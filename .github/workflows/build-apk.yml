@@ -25,6 +25,9 @@ jobs:
       - name: Compiler l'APK de test
         working-directory: android
         run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Tester les règles de saisie
+        working-directory: android
+        run: gradle --no-daemon :app:testDebugUnitTest
       - name: APK installable (test)
         uses: actions/upload-artifact@v4
         with:

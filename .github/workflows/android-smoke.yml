@@ -1,0 +1,71 @@
+name: Android runtime smoke test
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-smoke.yml'
+jobs:
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12.1'
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Boot emulator and test real Android launch
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_4
+          target: default
+          ram-size: 2048M
+          heap-size: 512M
+          emulator-boot-timeout: 900
+          disable-animations: true
+          script: |
+            set -euo pipefail
+            APK=android/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r "$APK"
+            adb logcat -c
+            adb shell am start -W -n fr.denizot.dictee.inline.test/fr.denizot.dictee.MainActivity
+            sleep 7
+            adb logcat -d -v time > android-smoke-logcat.txt
+            adb shell dumpsys activity activities > android-smoke-activity.txt
+            adb shell screencap -p /sdcard/dictee-launch.png
+            adb pull /sdcard/dictee-launch.png android-smoke-screenshot.png
+            if grep -A 25 -B 2 'FATAL EXCEPTION' android-smoke-logcat.txt | grep -q 'fr.denizot.dictee'; then
+              echo "::error::FATAL EXCEPTION in Dictée universelle"
+              grep -A 35 -B 4 'FATAL EXCEPTION' android-smoke-logcat.txt | tail -100
+              exit 1
+            fi
+            if ! adb shell pidof fr.denizot.dictee.inline.test | grep -Eq '[0-9]'; then
+              echo "::error::Application stopped after launch"
+              tail -150 android-smoke-logcat.txt
+              exit 1
+            fi
+            echo "Application remained running for 7 seconds on Android API 34"
+      - name: Preserve crash diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime-diagnostics
+          path: |
+            android-smoke-logcat.txt
+            android-smoke-activity.txt
+            android-smoke-screenshot.png
+          if-no-files-found: ignore

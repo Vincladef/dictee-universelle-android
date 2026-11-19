@@ -56,15 +56,16 @@ jobs:
           fi
           set -euo pipefail
           REPO="Vincladef/dictee-universelle-updates"
-          APK="android/app/build/outputs/apk/release/app-release.apk"
+          cp android/app/build/outputs/apk/release/app-release.apk dictee-universelle.apk
+          APK="dictee-universelle.apk"
           CODE="$(grep -Po 'versionCode = \K[0-9]+' android/app/build.gradle.kts | head -1)"
           VERSION="$(grep -Po 'versionName = "\K[^"]+' android/app/build.gradle.kts | head -1)"
           TAG="v${VERSION}"
           SHA="$(sha256sum "$APK" | awk '{print $1}')"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK#dictee-universelle.apk" --clobber --repo "$REPO"
+            gh release upload "$TAG" "$APK" --clobber --repo "$REPO"
           else
-            gh release create "$TAG" "$APK#dictee-universelle.apk" --repo "$REPO" \
+            gh release create "$TAG" "$APK" --repo "$REPO" \
               --title "Dictée universelle $VERSION" \
               --notes "Mise à jour Android signée du clavier de dictée."
           fi

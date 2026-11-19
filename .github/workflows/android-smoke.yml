@@ -37,28 +37,7 @@ jobs:
           heap-size: 512M
           emulator-boot-timeout: 900
           disable-animations: true
-          script: |
-            set -euo pipefail
-            APK=android/app/build/outputs/apk/debug/app-debug.apk
-            adb install -r "$APK"
-            adb logcat -c
-            adb shell am start -W -n fr.denizot.dictee.inline.test/fr.denizot.dictee.MainActivity
-            sleep 7
-            adb logcat -d -v time > android-smoke-logcat.txt
-            adb shell dumpsys activity activities > android-smoke-activity.txt
-            adb shell screencap -p /sdcard/dictee-launch.png
-            adb pull /sdcard/dictee-launch.png android-smoke-screenshot.png
-            if grep -A 25 -B 2 'FATAL EXCEPTION' android-smoke-logcat.txt | grep -q 'fr.denizot.dictee'; then
-              echo "::error::FATAL EXCEPTION in Dictée universelle"
-              grep -A 35 -B 4 'FATAL EXCEPTION' android-smoke-logcat.txt | tail -100
-              exit 1
-            fi
-            if ! adb shell pidof fr.denizot.dictee.inline.test | grep -Eq '[0-9]'; then
-              echo "::error::Application stopped after launch"
-              tail -150 android-smoke-logcat.txt
-              exit 1
-            fi
-            echo "Application remained running for 7 seconds on Android API 34"
+          script: bash .github/scripts/android-runtime-smoke.sh
       - name: Preserve crash diagnostics
         if: always()
         uses: actions/upload-artifact@v4

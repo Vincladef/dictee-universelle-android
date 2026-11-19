@@ -141,6 +141,10 @@ class DictationKeyboard : InputMethodService() {
     private fun editable() = currentInputConnection
     private fun enterText(value: String) {
         editable()?.commitText(value, 1)
+        if (value == "\n" && page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            shift = Shift.ONCE
+            buildKeys()
+        }
         refreshSuggestions()
     }
 
@@ -542,6 +546,13 @@ class DictationKeyboard : InputMethodService() {
         } else {
             enterText(" ")
         }
+        if (page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            val beforeSpace = before.trimEnd().lastOrNull()
+            if (beforeSpace == '.' || beforeSpace == '!' || beforeSpace == '?') {
+                shift = Shift.ONCE
+                buildKeys()
+            }
+        }
         refreshSuggestions()
     }
 
@@ -745,6 +756,10 @@ class DictationKeyboard : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        if (page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            val caps = editable()?.getCursorCapsMode(InputType.TYPE_TEXT_FLAG_CAP_SENTENCES) ?: 0
+            if (caps and InputType.TYPE_TEXT_FLAG_CAP_SENTENCES != 0) shift = Shift.ONCE
+        }
         buildKeys()
         updateControls()
     }

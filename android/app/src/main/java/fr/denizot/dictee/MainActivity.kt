@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var recorderButton: Button
     private lateinit var history: LinearLayout
+    private lateinit var updateStatus: TextView
+    private lateinit var updateButton: Button
     private lateinit var endpointField: EditText
     private lateinit var tokenField: EditText
     private var player: MediaPlayer? = null
@@ -94,10 +96,29 @@ class MainActivity : Activity() {
                 toast("Paramètres enregistrés")
             }
         })
+        root.addView(text("MISES À JOUR DU CLAVIER", 14f, true))
+        updateStatus = text("Vérification automatique des nouvelles versions", 13f)
+        root.addView(updateStatus)
+        updateButton = button("Vérifier maintenant") {
+            updateStatus.text = "Recherche et téléchargement éventuel…"
+            Updates.check(this, force = true) { state ->
+                if (!isFinishing) { updateStatus.text = state; refreshUpdateUi() }
+            }
+        }
+        root.addView(updateButton)
+        root.addView(button("Installer la mise à jour disponible") {
+            toast(Updates.install(this))
+        })
+        root.addView(text("Les versions sont téléchargées automatiquement ; Android demande une confirmation pour les installer.", 12f))
         root.addView(text("MES DICTÉES", 16f, true))
         history = column(); root.addView(history)
         setContentView(scroll)
         refreshHistory()
+        Updates.schedule(this)
+        refreshUpdateUi()
+        Updates.check(this) { state ->
+            if (!isFinishing) { updateStatus.text = state; refreshUpdateUi() }
+        }
         handler.post(object : Runnable {
             override fun run() {
                 updateRecordingUi()
@@ -106,6 +127,14 @@ class MainActivity : Activity() {
                 handler.postDelayed(this, 1300)
             }
         })
+    }
+    private fun refreshUpdateUi() {
+        val version = Updates.ready(this)
+        if (version != null) updateStatus.text = "Version ${version.first} téléchargée et prête à installer"
+    }
+    override fun onResume() {
+        super.onResume()
+        if (::updateStatus.isInitialized) refreshUpdateUi()
     }
     private fun updateRecordingUi() {
         recorderButton.text = if (CaptureService.active) "Terminer et conserver la dictée" else "Démarrer l'enregistrement"

@@ -56,7 +56,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = accent
         window.navigationBarColor = cream
-        val scroll = ScrollView(this).apply { setBackgroundColor(cream); fillViewport = true }
+        val scroll = ScrollView(this).apply { setBackgroundColor(cream); isFillViewport = true }
         val root = column().apply { setPadding(dp(20), dp(22), dp(20), dp(24)) }
         scroll.addView(root)
         root.addView(text("Dictée universelle", 28f, true))

@@ -533,7 +533,9 @@ class DictationKeyboard : InputMethodService() {
             connection.beginBatchEdit()
             try {
                 val len = word.codePointCount(0, word.length)
-                connection.deleteSurroundingTextInCodePoints(len, 0)
+                if (!connection.deleteSurroundingTextInCodePoints(len, 0)) {
+                    connection.deleteSurroundingText(word.length, 0)
+                }
                 connection.commitText(correction + " ", 1)
             } finally { connection.endBatchEdit() }
             status("Correction : " + correction)
@@ -577,9 +579,10 @@ class DictationKeyboard : InputMethodService() {
                 val connection = editable() ?: return@key
                 val before = connection.getTextBeforeCursor(80, 0)?.toString().orEmpty()
                 val current = KeyboardLexicon.currentWord(before)
+                val selection = connection.getSelectedText(0)
                 connection.beginBatchEdit()
                 try {
-                    if (current.isNotEmpty())
+                    if (selection.isNullOrEmpty() && current.isNotEmpty())
                         connection.deleteSurroundingTextInCodePoints(current.codePointCount(0, current.length), 0)
                     connection.commitText(proposal + " ", 1)
                 } finally { connection.endBatchEdit() }

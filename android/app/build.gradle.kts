@@ -7,8 +7,8 @@ android {
         applicationId = "fr.denizot.dictee.inline"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     signingConfigs {
@@ -25,6 +25,10 @@ android {
         }
     }
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
+        }
         getByName("release") {
             signingConfig = signingConfigs.getByName("ota")
             isMinifyEnabled = false
@@ -35,4 +39,7 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
-dependencies { implementation("androidx.core:core:1.15.0") }
+dependencies {
+    implementation("androidx.core:core:1.15.0")
+    testImplementation("junit:junit:4.13.2")
+}

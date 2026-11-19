@@ -15,70 +15,171 @@ import android.os.IBinder
 import android.os.SystemClock
 import java.io.File
 
-/** A user-started microphone foreground service; audio keeps recording after screen lock. */
+/** Service audio unique : PAUSE conserve la session, STOP sauvegarde sans transcrire. */
 class CaptureService : Service() {
     companion object {
         const val START = "fr.denizot.dictee.START"
+        const val PAUSE = "fr.denizot.dictee.PAUSE"
+        const val RESUME = "fr.denizot.dictee.RESUME"
         const val STOP = "fr.denizot.dictee.STOP"
         const val CHANNEL = "microphone"
         const val NOTIFICATION_ID = 81
+
         @Volatile var active = false
-        @Volatile var startedElapsedMs: Long = 0L
+            private set
+        @Volatile var paused = false
+            private set
+        @Volatile var sessionId: String? = null
+            private set
+        @Volatile var startedElapsedMs = 0L
+            private set
+        @Volatile var pausedElapsedMs = 0L
+            private set
+        @Volatile var pauseStartedElapsedMs = 0L
+            private set
         @Volatile var lastError = ""
+            private set
+
+        fun recordedDurationMs(): Long {
+            if (!active || startedElapsedMs == 0L) return 0L
+            val now = if (paused) pauseStartedElapsedMs else SystemClock.elapsedRealtime()
+            return (now - startedElapsedMs - pausedElapsedMs).coerceAtLeast(0L)
+        }
     }
+
     private val store by lazy { SessionStore(this) }
     private var current: DictationSession? = null
     private var recorder: MediaRecorder? = null
     private var currentFile: File? = null
-    private var startedElapsed: Long = 0
     private var terminating = false
 
     override fun onBind(intent: Intent?): IBinder? = null
+
     override fun onCreate() {
         super.onCreate()
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel(CHANNEL, "Enregistrement audio", NotificationManager.IMPORTANCE_LOW))
+        getSystemService(NotificationManager::class.java).createNotificationChannel(
+            NotificationChannel(CHANNEL, "Dictée en cours", NotificationManager.IMPORTANCE_LOW)
+        )
     }
+
+    private fun pending(action: String, requestCode: Int) = PendingIntent.getService(
+        this, requestCode, Intent(this, CaptureService::class.java).setAction(action),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
     private fun notification(): Notification {
-        val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        val stop = PendingIntent.getService(this, 1, Intent(this, CaptureService::class.java).setAction(STOP), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        return Notification.Builder(this, CHANNEL).setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Dictée en cours").setContentText("L'enregistrement continue écran verrouillé")
-            .setContentIntent(open).setOngoing(true)
-            .addAction(Notification.Action.Builder(android.R.drawable.ic_media_pause, "Terminer", stop).build()).build()
+        val open = PendingIntent.getActivity(
+            this, 0, Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val isPaused = paused
+        return Notification.Builder(this, CHANNEL)
+            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setContentTitle(if (isPaused) "Dictée en pause" else "Dictée en cours")
+            .setContentText(
+                if (isPaused) "Reprendre ou terminer depuis la notification"
+                else "L'enregistrement continue avec l'écran verrouillé"
+            )
+            .setContentIntent(open)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .addAction(
+                Notification.Action.Builder(
+                    if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause,
+                    if (isPaused) "Reprendre" else "Pause",
+                    if (isPaused) pending(RESUME, 2) else pending(PAUSE, 1)
+                ).build()
+            )
+            .addAction(
+                Notification.Action.Builder(
+                    android.R.drawable.ic_media_next, "Arrêter et sauvegarder", pending(STOP, 3)
+                ).build()
+            )
+            .build()
     }
+
+    private fun updateNotification() {
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification())
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            START -> if (!active && !terminating) startRecording(intent.getStringExtra("source") ?: "app")
+            PAUSE -> pauseRecording()
+            RESUME -> resumeRecording()
             STOP -> stopRecording()
-            START -> if (!active) startRecording(intent.getStringExtra("source") ?: "app")
         }
-        return if (active) START_NOT_STICKY else START_NOT_STICKY
+        return START_NOT_STICKY
     }
-    private fun startRecording(source: String) {
+
+    @Synchronized private fun startRecording(source: String) {
+        if (active) return
         try {
             if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                lastError = "Autorisation microphone manquante"; stopSelf(); return
+                lastError = "Autorisation microphone manquante"
+                stopSelf()
+                return
             }
             if (Build.VERSION.SDK_INT >= 29) {
                 startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-            } else startForeground(NOTIFICATION_ID, notification())
-            lastError = ""; terminating = false
+            } else {
+                startForeground(NOTIFICATION_ID, notification())
+            }
+            lastError = ""
+            terminating = false
+            paused = false
+            pausedElapsedMs = 0L
+            pauseStartedElapsedMs = 0L
             current = store.newSession(source)
-            startedElapsed = SystemClock.elapsedRealtime()
-            startedElapsedMs = startedElapsed
+            sessionId = current?.id
+            startedElapsedMs = SystemClock.elapsedRealtime()
             startPart()
             active = true
+            updateNotification()
         } catch (e: Exception) {
-            lastError = "Enregistrement impossible : ${e.message}"
+            lastError = "Enregistrement impossible : " + (e.message ?: "erreur")
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
-            releaseRecorder(); active = false; startedElapsedMs = 0L; stopSelf()
+            releaseRecorder()
+            clearStatus()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
         }
     }
+
+    @Synchronized private fun pauseRecording() {
+        if (!active || paused || terminating) return
+        try {
+            recorder?.pause() ?: error("Enregistreur indisponible")
+            pauseStartedElapsedMs = SystemClock.elapsedRealtime()
+            paused = true
+            current?.let { it.state = "paused"; store.save(it) }
+            updateNotification()
+        } catch (e: Exception) {
+            lastError = "Pause impossible : " + (e.message ?: "erreur")
+        }
+    }
+
+    @Synchronized private fun resumeRecording() {
+        if (!active || !paused || terminating) return
+        try {
+            recorder?.resume() ?: error("Enregistreur indisponible")
+            pausedElapsedMs += (SystemClock.elapsedRealtime() - pauseStartedElapsedMs).coerceAtLeast(0)
+            pauseStartedElapsedMs = 0L
+            paused = false
+            current?.let { it.state = "recording"; store.save(it) }
+            updateNotification()
+        } catch (e: Exception) {
+            lastError = "Reprise impossible : " + (e.message ?: "erreur")
+        }
+    }
+
     private fun startPart() {
         val session = current ?: return
         val file = store.segmentFile(session, session.segments.size)
         currentFile = file
-        val media = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
+        val media = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this)
+            else @Suppress("DEPRECATION") MediaRecorder()
         media.setAudioSource(MediaRecorder.AudioSource.MIC)
         media.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
         media.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -86,31 +187,35 @@ class CaptureService : Service() {
         media.setAudioSamplingRate(16000)
         media.setAudioEncodingBitRate(64000)
         media.setOutputFile(file.absolutePath)
-        media.setMaxDuration(180000) // ~1.5 MB audio/segment, under Vercel's request limit.
-        media.setOnInfoListener { _, what, _ ->
-            if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) rotatePart()
+        media.setMaxDuration(180000)
+        media.setOnInfoListener { _, event, _ ->
+            if (event == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) rotatePart()
         }
         media.prepare()
         media.start()
         recorder = media
     }
+
     private fun releaseRecorder() {
         val media = recorder
         recorder = null
         try { media?.stop() } catch (_: Exception) { currentFile?.delete() }
         try { media?.reset(); media?.release() } catch (_: Exception) {}
     }
+
     @Synchronized private fun rotatePart() {
         if (terminating) return
         try {
             finalizePart()
             startPart()
+            if (paused) recorder?.pause()
         } catch (e: Exception) {
-            lastError = "Interruption du microphone : ${e.message}"
-            current?.let { it.error = lastError }
+            lastError = "Interruption du microphone : " + (e.message ?: "erreur")
+            current?.error = lastError
             stopRecording(interrupted = true)
         }
     }
+
     private fun finalizePart() {
         val file = currentFile
         releaseRecorder()
@@ -119,25 +224,39 @@ class CaptureService : Service() {
         } else file?.delete()
         currentFile = null
     }
+
     @Synchronized private fun stopRecording(interrupted: Boolean = false) {
         if (terminating) return
         terminating = true
+        val duration = recordedDurationMs()
         try {
             finalizePart()
             current?.let { session ->
-                session.durationMs = SystemClock.elapsedRealtime() - startedElapsed
+                session.durationMs = duration
                 session.state = if (interrupted || session.segments.isEmpty()) "interrupted" else "ready"
-                if (session.segments.isEmpty() && session.error.isEmpty()) session.error = "Aucun segment exploitable"
+                if (session.segments.isEmpty() && session.error.isBlank()) session.error = "Aucun audio exploitable"
                 store.save(session)
             }
         } catch (e: Exception) {
-            lastError = "Finalisation incomplète : ${e.message}"
+            lastError = "Sauvegarde incomplète : " + (e.message ?: "erreur")
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
         } finally {
-            active = false; startedElapsedMs = 0L; current = null
-            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+            clearStatus()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
         }
     }
+
+    private fun clearStatus() {
+        active = false
+        paused = false
+        sessionId = null
+        startedElapsedMs = 0L
+        pausedElapsedMs = 0L
+        pauseStartedElapsedMs = 0L
+        current = null
+    }
+
     override fun onDestroy() {
         if (active && !terminating) stopRecording(interrupted = true)
         super.onDestroy()

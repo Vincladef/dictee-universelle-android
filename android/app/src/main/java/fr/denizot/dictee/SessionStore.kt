@@ -62,6 +62,25 @@ class SessionStore(private val context: Context) {
     }
     fun all(): List<DictationSession> = root.listFiles().orEmpty()
         .filter { it.isDirectory }.mapNotNull { get(it.name) }.sortedByDescending { it.createdAt }
+    /**
+     * Si Android a arrêté brutalement le processus, les fragments déjà finalisés
+     * restent disponibles. On ne fait jamais passer un fichier incomplet pour un M4A valide.
+     */
+    fun recoverAbandonedSessions() {
+        if (CaptureService.active) return
+        val now = System.currentTimeMillis()
+        all().filter {
+            it.state in setOf("recording", "paused") && now - it.createdAt > 60_000L
+        }.forEach { session ->
+            session.state = "interrupted"
+            if (session.error.isBlank()) {
+                session.error = if (session.segments.isEmpty())
+                    "Capture interrompue par Android ; vérifier l'audio récupérable."
+                else "Capture interrompue ; fragments déjà finalisés conservés."
+            }
+            save(session)
+        }
+    }
     fun delete(item: DictationSession) { folder(item).deleteRecursively() }
     fun latest(): DictationSession? = all().firstOrNull()
     fun segmentFile(item: DictationSession, index: Int) = File(folder(item), "part-%03d.m4a".format(index))

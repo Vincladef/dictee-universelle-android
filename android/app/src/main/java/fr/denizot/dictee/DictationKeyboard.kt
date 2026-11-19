@@ -2,294 +2,804 @@ package fr.denizot.dictee
 
 import android.Manifest
 import android.content.Intent
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
-import android.content.res.ColorStateList
+import android.content.res.Configuration
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.icu.text.BreakIterator
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
 import kotlin.concurrent.thread
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /**
- * La dictée démarre et se termine SUR le clavier, sans quitter le champ de saisie.
- * Seule l'autorisation microphone initiale, gérée par une Activity transparente,
- * peut momentanément afficher le dialogue système Android.
+ * Clavier AZERTY ergonomique, utilisable sans dictée.
+ * Le service microphone et le traitement IA sont indépendants de l'IME.
+ * Toute transcription est lancée uniquement par un appui sur « Transcrire ».
  */
 class DictationKeyboard : InputMethodService() {
     private val store by lazy { SessionStore(this) }
     private val handler = Handler(Looper.getMainLooper())
+    private val locale = Locale.FRENCH
 
+    private var root: LinearLayout? = null
     private var info: TextView? = null
-    private var mic: Button? = null
-    private var requestTime: Long = 0
-    private var waitingForRecording = false
-    private var starting = false
-    private var transcriptionRunning = false
-    private var handledSessionId: String? = null
-    private var upper = false
-    private var sourcePackage: String? = null
-    private var sourceFieldId: Int? = null
-    private var editorChanged = false
-    private var statusMessage = "🎙 Dictez directement dans ce champ"
+    private var actions: LinearLayout? = null
+    private var suggestions: LinearLayout? = null
+    private var keys: LinearLayout? = null
+    private var recordButton: Button? = null
+    private var pauseButton: Button? = null
+    private var stopButton: Button? = null
+    private var transcribeButton: Button? = null
+    private var insertButton: Button? = null
 
-    private val accent = Color.rgb(120, 75, 48)
-    private val recordingRed = Color.rgb(175, 43, 43)
+    private enum class Page { LETTERS, SYMBOLS, EMOJI, NUMBERS }
+    private enum class Shift { OFF, ONCE, LOCK }
+    private var page = Page.LETTERS
+    private var shift = Shift.OFF
+    private var lastShiftTap = 0L
+    private var startingAt = 0L
+    private var finishing = false
+    private var transcribing = false
+    private var status = "Dictez ou écrivez votre message"
+    private var lastSnapshot = ""
+    private var lastSuggestions = ""
+
+    private val dark get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        Configuration.UI_MODE_NIGHT_YES
+    private val background get() = if (dark) Color.rgb(34, 37, 44) else Color.rgb(232, 235, 241)
+    private val keyColor get() = if (dark) Color.rgb(65, 68, 76) else Color.rgb(253, 253, 255)
+    private val utilityColor get() = if (dark) Color.rgb(82, 87, 98) else Color.rgb(208, 215, 227)
+    private val foreground get() = if (dark) Color.WHITE else Color.rgb(29, 32, 38)
+    private val secondary get() = if (dark) Color.rgb(184, 192, 206) else Color.rgb(96, 105, 120)
+    private val primary get() = if (dark) Color.rgb(109, 151, 241) else Color.rgb(56, 104, 198)
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun addKey(row: LinearLayout, label: String, weight: Float = 1f, action: () -> Unit): Button {
+    private fun bg(color: Int): GradientDrawable = GradientDrawable().apply {
+        setColor(color)
+        cornerRadius = dp(7).toFloat()
+    }
+
+    private fun line(target: LinearLayout): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        target.addView(this, LinearLayout.LayoutParams(-1, -2))
+    }
+
+    private fun key(
+        row: LinearLayout, title: String, width: Float = 1f,
+        special: Boolean = false, accent: Boolean = false,
+        action: () -> Unit
+    ): Button {
         val button = Button(this).apply {
-            text = label
+            text = title
             isAllCaps = false
-            minWidth = 0; minimumWidth = 0
+            textSize = when {
+                title.length > 11 -> 10.5f
+                title.length > 6 -> 12f
+                title.length > 3 -> 14f
+                else -> 19f
+            }
+            setTextColor(this@DictationKeyboard.foreground)
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
             setPadding(0, 0, 0, 0)
-            textSize = if (label.length > 8) 11f else 17f
-            setOnClickListener { action() }
+            background = bg(if (accent) primary else if (special) utilityColor else keyColor)
+            if (accent) setTextColor(Color.WHITE)
+            stateListAnimator = null
+            setOnClickListener {
+                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                action()
+            }
         }
-        row.addView(button, LinearLayout.LayoutParams(0, dp(48), weight))
+        row.addView(button, LinearLayout.LayoutParams(0, dp(47), width).apply {
+            setMargins(dp(2), dp(3), dp(2), dp(3))
+        })
         return button
     }
-    private fun row(root: LinearLayout) = LinearLayout(this).also { root.addView(it) }
-    private fun report(value: String) {
-        statusMessage = value
+
+    private fun title(value: String, target: LinearLayout) = TextView(this).apply {
+        text = value
+        textSize = 12f
+        setTextColor(secondary)
+        setPadding(dp(9), dp(2), dp(5), dp(3))
+        target.addView(this, LinearLayout.LayoutParams(-1, -2))
+    }
+
+    private fun status(value: String) {
+        status = value
         info?.text = value
     }
-    private fun isProtected(): Boolean {
-        val inputType = currentInputEditorInfo?.inputType ?: return false
-        val variation = inputType and InputType.TYPE_MASK_VARIATION
-        return when (inputType and InputType.TYPE_MASK_CLASS) {
-            InputType.TYPE_CLASS_NUMBER -> variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-            InputType.TYPE_CLASS_TEXT -> variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+
+    /** Passwords are typeable; only reading, learning and voice insertion are blocked. */
+    private fun sensitive(): Boolean {
+        val editor = currentInputEditorInfo ?: return false
+        val kind = editor.inputType and InputType.TYPE_MASK_CLASS
+        val variation = editor.inputType and InputType.TYPE_MASK_VARIATION
+        return (kind == InputType.TYPE_CLASS_TEXT &&
+            (variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
                 variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
-                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
-            else -> false
-        }
+                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD)) ||
+            (kind == InputType.TYPE_CLASS_NUMBER && variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD)
     }
-    private fun write(value: String) {
-        if (isProtected()) {
-            report("Champ protégé : insertion de dictée désactivée")
-            return
+
+    private fun editable() = currentInputConnection
+    private fun enterText(value: String) {
+        editable()?.commitText(value, 1)
+        if (value == "\n" && page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            shift = Shift.ONCE
+            buildKeys()
         }
-        currentInputConnection?.commitText(value, 1)
+        refreshSuggestions()
     }
 
     override fun onCreateInputView(): View {
-        val root = LinearLayout(this).apply {
+        val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(3), dp(4), dp(3), dp(8))
-            setBackgroundColor(Color.rgb(245, 238, 225))
+            setBackgroundColor(this@DictationKeyboard.background)
+            setPadding(dp(3), dp(4), dp(3), dp(7))
         }
+        root = container
+        store.recoverAbandonedSessions()
         info = TextView(this).apply {
-            text = statusMessage
-            textSize = 13f
-            setTextColor(accent)
-            setPadding(dp(8), dp(1), 0, dp(5))
+            text = status
+            textSize = 12f
+            setTextColor(secondary)
+            setPadding(dp(9), 0, dp(6), dp(3))
+            maxLines = 2
         }
-        root.addView(info)
-        val actions = row(root)
-        mic = addKey(actions, "🎙 Dicter", 2f) { toggleRecording() }
-        addKey(actions, "Insérer texte", 1.5f) {
-            val previous = store.all().firstOrNull { it.transcript.isNotBlank() }
-            if (previous != null) {
-                if (isProtected()) report("Insertion impossible dans un mot de passe")
-                else {
-                    write(previous.transcript)
-                    report("Dernière dictée insérée")
-                }
-            } else report("Aucune transcription disponible")
-        }
-        addKey(actions, "⚙", 0.6f) {
-            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }
-        addKey(actions, "🌐", 0.6f) { switchToNextInputMethod(false) }
-        listOf("azertyuiop", "qsdfghjklm", "wxcvbn").forEachIndexed { index, letters ->
-            val line = row(root)
-            if (index == 2) addKey(line, "⇧") {
-                upper = !upper
-                report(if (upper) "Majuscules activées" else "Dictée directement dans ce champ")
-            }
-            letters.forEach { character ->
-                addKey(line, character.toString()) {
-                    write(if (upper) character.uppercaseChar().toString() else character.toString())
-                    upper = false
-                }
-            }
-            if (index == 2) addKey(line, "⌫") {
-                currentInputConnection?.deleteSurroundingText(1, 0)
-            }
-        }
-        val bottom = row(root)
-        addKey(bottom, ",") { write(",") }
-        addKey(bottom, "espace", 5f) { write(" ") }
-        addKey(bottom, ".") { write(".") }
-        addKey(bottom, "↵") { write("\n") }
+        container.addView(info)
+        actions = line(container)
+        buildActions()
+        suggestions = line(container)
+        keys = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        container.addView(keys)
+        buildKeys()
         updateControls()
-        return root
+        return container
     }
 
-    private fun toggleRecording() {
-        if (transcriptionRunning) return
-        if (CaptureService.active) {
-            mic?.isEnabled = false
-            mic?.text = "Finalisation…"
-            report("Enregistrement terminé ; sauvegarde de l'audio…")
-            startService(Intent(this, CaptureService::class.java).setAction(CaptureService.STOP))
+    private fun buildActions() {
+        val bar = actions ?: return
+        bar.removeAllViews()
+        recordButton = key(bar, "🎙 Dicter", 2.2f, accent = true) { startRecording() }
+        pauseButton = key(bar, "⏸ Pause", 1.8f, special = true) {
+            if (CaptureService.paused) command(CaptureService.RESUME)
+            else command(CaptureService.PAUSE)
+        }
+        stopButton = key(bar, "■ Arrêter", 1.9f, special = true) {
+            finishing = true
+            status("Sauvegarde de l'audio…")
+            command(CaptureService.STOP)
+        }
+        transcribeButton = key(bar, "✨ Transcrire", 2.4f, accent = true) { transcribeLatest() }
+        insertButton = key(bar, "Insérer", 1.65f, accent = true) { insertLatest() }
+        key(bar, "⚙", 0.66f, special = true) {
+            startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+        key(bar, "🌐", 0.66f, special = true) {
+            try { switchToNextInputMethod(false) }
+            catch (_: Exception) {
+                (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                    .showInputMethodPicker()
+            }
+        }
+    }
+
+    private fun buildKeys() {
+        val box = keys ?: return
+        box.removeAllViews()
+        when (page) {
+            Page.LETTERS -> letterKeys(box)
+            Page.SYMBOLS -> symbolKeys(box)
+            Page.EMOJI -> emojiKeys(box)
+            Page.NUMBERS -> numberKeys(box)
+        }
+        refreshSuggestions()
+    }
+
+    private val accents = mapOf(
+        'a' to "àâäæ", 'e' to "éèêë", 'i' to "îï", 'o' to "ôöœ",
+        'u' to "ùûü", 'c' to "ç", 'n' to "ñ", 'y' to "ÿ", 's' to "ß"
+    )
+
+    private fun letterKeys(box: LinearLayout) {
+        val rows = listOf("azertyuiop", "qsdfghjklm", "wxcvbn")
+        rows.forEachIndexed { index, letters ->
+            val row = line(box)
+            if (index == 2) {
+                key(row, if (shift == Shift.LOCK) "⇪" else "⇧", 1.35f, special = true) {
+                    val now = SystemClock.uptimeMillis()
+                    shift = when {
+                        shift == Shift.LOCK -> Shift.OFF
+                        now - lastShiftTap < 420L -> Shift.LOCK
+                        shift == Shift.ONCE -> Shift.OFF
+                        else -> Shift.ONCE
+                    }
+                    lastShiftTap = now
+                    buildKeys()
+                }
+            }
+            letters.forEach { char ->
+                val label = if (shift != Shift.OFF) char.uppercaseChar().toString() else char.toString()
+                val view = key(row, label, 1f) {
+                    enterText(label)
+                    if (shift == Shift.ONCE) {
+                        shift = Shift.OFF
+                        buildKeys()
+                    }
+                }
+                val forms = accents[char]
+                if (!forms.isNullOrBlank()) view.setOnLongClickListener {
+                    val menu = PopupMenu(this, view)
+                    forms.forEachIndexed { i, variant ->
+                        val value = if (shift == Shift.OFF) variant.toString()
+                            else variant.uppercaseChar().toString()
+                        menu.menu.add(0, i, i, value)
+                    }
+                    menu.setOnMenuItemClickListener {
+                        enterText(it.title.toString())
+                        if (shift == Shift.ONCE) { shift = Shift.OFF; buildKeys() }
+                        true
+                    }
+                    menu.show()
+                    true
+                }
+            }
+            if (index == 2) addDelete(row)
+        }
+
+        val bottom = line(box)
+        key(bottom, "?123", 1.4f, special = true) { page = Page.SYMBOLS; buildKeys() }
+        key(bottom, "☺", 1.1f, special = true) { page = Page.EMOJI; buildKeys() }
+        key(bottom, ",", 0.9f) { enterText(",") }
+        val space = key(bottom, "Français", 5.1f) {}
+        configureSpace(space)
+        key(bottom, ".", 0.9f) { enterText(".") }
+        addEnter(bottom, 1.4f)
+    }
+
+    private fun symbolKeys(box: LinearLayout) {
+        listOf(
+            listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+            listOf("@", "#", "€", "_", "&", "-", "+", "(", ")", "/")
+        ).forEach { characters ->
+            val row = line(box)
+            characters.forEach { key(row, it) { enterText(it) } }
+        }
+        val punctuation = line(box)
+        key(punctuation, "ABC", 1.4f, special = true) { page = Page.LETTERS; buildKeys() }
+        listOf("*", "\"", "'", ":", ";", "!", "?").forEach { key(punctuation, it) { enterText(it) } }
+        addDelete(punctuation)
+        val bottom = line(box)
+        key(bottom, "ABC", 1.4f, special = true) { page = Page.LETTERS; buildKeys() }
+        key(bottom, "☺", 1.1f, special = true) { page = Page.EMOJI; buildKeys() }
+        key(bottom, ",") { enterText(",") }
+        val space = key(bottom, "espace", 5.1f) {}
+        configureSpace(space)
+        key(bottom, ".") { enterText(".") }
+        addEnter(bottom, 1.4f)
+    }
+
+    private fun emojiKeys(box: LinearLayout) {
+        val values = listOf(
+            "😀😂😊😍🥰🙂😉😅😎🤔",
+            "😭😢😡😴🥳😇🙃😮🤩😘",
+            "👍👎👏🙏💪👌👋❤️💙💚",
+            "🎉✨🔥💯💬☀️🌈🍀🎵🎁"
+        )
+        // Iterate grapheme clusters rather than UTF-16 chars (emoji may use surrogate pairs).
+        val emojiRows = listOf(
+            listOf("😀", "😂", "😊", "😍", "🥰", "🙂", "😉", "😅", "😎", "🤔"),
+            listOf("😭", "😢", "😡", "😴", "🥳", "😇", "🙃", "😮", "🤩", "😘"),
+            listOf("👍", "👎", "👏", "🙏", "💪", "👌", "👋", "❤️", "💙", "💚"),
+            listOf("🎉", "✨", "🔥", "💯", "💬", "☀️", "🌈", "🍀", "🎵", "🎁")
+        )
+        emojiRows.forEach { list ->
+            val row = line(box)
+            list.forEach { emoji -> key(row, emoji) { enterText(emoji) } }
+        }
+        val bottom = line(box)
+        key(bottom, "ABC", 1.5f, special = true) { page = Page.LETTERS; buildKeys() }
+        key(bottom, "?123", 1.5f, special = true) { page = Page.SYMBOLS; buildKeys() }
+        val space = key(bottom, "espace", 5f) {}
+        configureSpace(space)
+        addDelete(bottom)
+    }
+
+    private fun numberKeys(box: LinearLayout) {
+        listOf("123", "456", "789").forEach { digits ->
+            val row = line(box)
+            digits.forEach { key(row, it.toString()) { enterText(it.toString()) } }
+        }
+        val bottom = line(box)
+        key(bottom, ",") { enterText(",") }
+        key(bottom, "0") { enterText("0") }
+        key(bottom, ".") { enterText(".") }
+        addDelete(bottom)
+        val secondaryRow = line(box)
+        key(secondaryRow, "+") { enterText("+") }
+        key(secondaryRow, "-") { enterText("-") }
+        addEnter(secondaryRow)
+    }
+
+    private fun actionType(): Int {
+        val info = currentInputEditorInfo ?: return EditorInfo.IME_ACTION_NONE
+        if (info.imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION != 0) return EditorInfo.IME_ACTION_NONE
+        return info.imeOptions and EditorInfo.IME_MASK_ACTION
+    }
+
+    private fun addEnter(row: LinearLayout, weight: Float = 1f) {
+        val action = actionType()
+        val label = when (action) {
+            EditorInfo.IME_ACTION_SEARCH -> "⌕"
+            EditorInfo.IME_ACTION_SEND -> "➤"
+            EditorInfo.IME_ACTION_DONE -> "✓"
+            EditorInfo.IME_ACTION_NEXT -> "→"
+            EditorInfo.IME_ACTION_GO -> "Aller"
+            else -> "↵"
+        }
+        key(row, label, weight, accent = true) {
+            val connection = editable() ?: return@key
+            if (action in listOf(
+                    EditorInfo.IME_ACTION_SEND, EditorInfo.IME_ACTION_DONE,
+                    EditorInfo.IME_ACTION_SEARCH, EditorInfo.IME_ACTION_GO,
+                    EditorInfo.IME_ACTION_NEXT, EditorInfo.IME_ACTION_PREVIOUS
+                )) {
+                if (!connection.performEditorAction(action)) enterText("\n")
+            } else enterText("\n")
+        }
+    }
+
+    private fun deleteOne() {
+        val connection = editable() ?: return
+        if (sensitive()) {
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
             return
         }
-        if (starting || waitingForRecording) return
-        requestTime = System.currentTimeMillis()
-        waitingForRecording = true
-        starting = true
-        handledSessionId = null
-        editorChanged = false
-        sourcePackage = currentInputEditorInfo?.packageName
-        sourceFieldId = currentInputEditorInfo?.fieldId
+        val selected = connection.getSelectedText(0)
+        val extracted = connection.getExtractedText(ExtractedTextRequest(), 0)
+        if (!selected.isNullOrEmpty() ||
+            (extracted != null && extracted.selectionStart >= 0 &&
+                extracted.selectionEnd > extracted.selectionStart)) {
+            connection.beginBatchEdit()
+            try { connection.commitText("", 1) }
+            finally { connection.endBatchEdit() }
+            refreshSuggestions()
+            return
+        }
+        val before = connection.getTextBeforeCursor(96, 0)?.toString().orEmpty()
+        if (before.isEmpty()) {
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+        } else {
+            val breaker = BreakIterator.getCharacterInstance(locale)
+            breaker.setText(before)
+            val boundary = breaker.preceding(before.length)
+            val from = if (boundary == BreakIterator.DONE) 0 else boundary
+            val count = before.codePointCount(from, before.length).coerceAtLeast(1)
+            if (!connection.deleteSurroundingTextInCodePoints(count, 0)) {
+                connection.deleteSurroundingText(before.length - from, 0)
+            }
+        }
+        refreshSuggestions()
+    }
+
+    private fun deleteWordsBySwipe(snapshot: String, cursorAtDown: Int, steps: Int) {
+        if (cursorAtDown < 0 || snapshot.isBlank()) return
+        var idx = snapshot.length
+        repeat(steps.coerceIn(1, 20)) {
+            while (idx > 0 && snapshot[idx - 1].isWhitespace()) idx--
+            while (idx > 0 && !snapshot[idx - 1].isWhitespace()) idx--
+        }
+        if (idx < snapshot.length) {
+            val from = (cursorAtDown - (snapshot.length - idx)).coerceAtLeast(0)
+            editable()?.setSelection(from, cursorAtDown)
+        }
+    }
+
+    private fun addDelete(row: LinearLayout) {
+        val button = key(row, "⌫", 1.35f, special = true) {}
+        var downX = 0f
+        var swiping = false
+        var selectedAtDown = false
+        var before = ""
+        var cursorAtDown = -1
+        var initialDone = false
+        var repeats = 0
+        val repeat = object : Runnable {
+            override fun run() {
+                deleteOne()
+                repeats++
+                handler.postDelayed(this, if (repeats > 14) 38L else 75L)
+            }
+        }
+        val firstDelete = Runnable {
+            if (!swiping) {
+                deleteOne()
+                initialDone = true
+                handler.postDelayed(repeat, 390L)
+            }
+        }
+        button.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.x
+                    swiping = false
+                    initialDone = false
+                    repeats = 0
+                    val connection = editable()
+                    val extracted = connection?.getExtractedText(ExtractedTextRequest(), 0)
+                    cursorAtDown = if (sensitive()) -1 else extracted?.selectionEnd ?: -1
+                    selectedAtDown = if (sensitive()) false else !connection?.getSelectedText(0).isNullOrEmpty()
+                    before = if (sensitive()) "" else connection?.getTextBeforeCursor(280, 0)?.toString().orEmpty()
+                    handler.postDelayed(firstDelete, 65L)
+                    view.isPressed = true
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val left = downX - event.x
+                    if (!selectedAtDown && left > dp(27) && cursorAtDown >= 0) {
+                        if (!swiping) {
+                            swiping = true
+                            handler.removeCallbacks(firstDelete)
+                            handler.removeCallbacks(repeat)
+                        }
+                        val words = 1 + ((left - dp(27)) / dp(28).toFloat()).toInt()
+                        deleteWordsBySwipe(before, cursorAtDown, words)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(firstDelete)
+                    handler.removeCallbacks(repeat)
+                    view.isPressed = false
+                    if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+                        if (swiping && cursorAtDown >= 0) editable()?.setSelection(cursorAtDown, cursorAtDown)
+                    } else if (swiping) {
+                        editable()?.commitText("", 1)
+                        refreshSuggestions()
+                    } else if (!initialDone) deleteOne()
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun configureSpace(button: Button) {
+        var x0 = 0f
+        var previousStep = 0
+        var moved = false
+        button.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    x0 = event.x
+                    previousStep = 0
+                    moved = false
+                    view.isPressed = true
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = event.x - x0
+                    if (abs(dx) > dp(16)) moved = true
+                    if (moved) {
+                        val steps = (dx / dp(15).toFloat()).roundToInt()
+                        val amount = (steps - previousStep).coerceIn(-10, 10)
+                        repeat(abs(amount)) {
+                            val direction = if (amount < 0) KeyEvent.KEYCODE_DPAD_LEFT
+                                else KeyEvent.KEYCODE_DPAD_RIGHT
+                            editable()?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, direction))
+                            editable()?.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, direction))
+                        }
+                        previousStep = steps
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    view.isPressed = false
+                    if (!moved) writeSpace()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> { view.isPressed = false; true }
+                else -> true
+            }
+        }
+    }
+
+    private fun writeSpace() {
+        val connection = editable() ?: return
+        if (sensitive()) { connection.commitText(" ", 1); return }
+        val selected = connection.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            enterText(" ")
+            return
+        }
+        val before = connection.getTextBeforeCursor(80, 0)?.toString().orEmpty()
+        val word = KeyboardLexicon.currentWord(before)
+        val correction = KeyboardLexicon.correction(word)
+        if (!correction.isNullOrBlank()) {
+            connection.beginBatchEdit()
+            try {
+                val len = word.codePointCount(0, word.length)
+                if (!connection.deleteSurroundingTextInCodePoints(len, 0)) {
+                    connection.deleteSurroundingText(word.length, 0)
+                }
+                connection.commitText(correction + " ", 1)
+            } finally { connection.endBatchEdit() }
+            status("Correction : " + correction)
+        } else {
+            enterText(" ")
+        }
+        if (page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            val beforeSpace = before.trimEnd().lastOrNull()
+            if (beforeSpace == '.' || beforeSpace == '!' || beforeSpace == '?') {
+                shift = Shift.ONCE
+                buildKeys()
+            }
+        }
+        refreshSuggestions()
+    }
+
+    private fun refreshSuggestions() {
+        val target = suggestions ?: return
+        val previousText = if (sensitive()) "" else editable()?.getTextBeforeCursor(80, 0)?.toString().orEmpty()
+        val prefix = KeyboardLexicon.currentWord(previousText)
+        val snapshot = if (sensitive()) "protected" else prefix.lowercase(locale)
+        if (snapshot == lastSuggestions && target.childCount > 0) return
+        lastSuggestions = snapshot
+        target.removeAllViews()
+        val clipboard = key(target, "📋", 0.72f, special = true) {
+            val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = manager.primaryClip
+            val value = if (clip != null && clip.itemCount > 0)
+                clip.getItemAt(0).coerceToText(this).toString() else ""
+            if (value.isNotEmpty()) enterText(value)
+            else status("Presse-papiers vide")
+        }
+        clipboard.layoutParams.height = dp(36)
+        if (sensitive()) {
+            val text = TextView(this).apply {
+                text = "Saisie protégée · aucune dictée ni prédiction"
+                textSize = 12f
+                setTextColor(secondary)
+                setPadding(dp(10), dp(9), 0, dp(9))
+            }
+            target.addView(text, LinearLayout.LayoutParams(0, dp(36), 3f))
+            return
+        }
+        val proposals = KeyboardLexicon.candidates(prefix)
+        if (proposals.isEmpty()) {
+            val hint = TextView(this).apply {
+                text = "Français  ·  Maintenez une lettre pour les accents"
+                textSize = 12f
+                setTextColor(secondary)
+                setPadding(dp(10), dp(8), 0, dp(8))
+            }
+            target.addView(hint, LinearLayout.LayoutParams(0, dp(36), 3f))
+            return
+        }
+        proposals.forEach { proposal ->
+            val chip = key(target, proposal, 1f, special = false) {
+                val connection = editable() ?: return@key
+                val before = connection.getTextBeforeCursor(80, 0)?.toString().orEmpty()
+                val current = KeyboardLexicon.currentWord(before)
+                val selection = connection.getSelectedText(0)
+                connection.beginBatchEdit()
+                try {
+                    if (selection.isNullOrEmpty() && current.isNotEmpty())
+                        connection.deleteSurroundingTextInCodePoints(current.codePointCount(0, current.length), 0)
+                    connection.commitText(proposal + " ", 1)
+                } finally { connection.endBatchEdit() }
+                refreshSuggestions()
+            }
+            chip.textSize = 13f
+            chip.setTypeface(null, Typeface.BOLD)
+            chip.layoutParams.height = dp(37)
+        }
+    }
+
+    private fun command(action: String) {
+        try {
+            startService(Intent(this, CaptureService::class.java).setAction(action))
+        } catch (e: Exception) {
+            status("Commande audio indisponible : " + (e.message ?: "erreur"))
+        }
+        handler.postDelayed({ updateControls() }, 150L)
+    }
+
+    private fun startRecording() {
+        if (sensitive()) { status("Dictée désactivée dans les champs de mot de passe"); return }
+        if (CaptureService.active || startingAt > 0L || transcribing) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            report("Autorisation du microphone : dialogue Android (une seule fois)")
-            // On ne lance jamais la page principale depuis le bouton Dicter.
-            // Le dialogue système passe par une Activity transparente puis lance le service.
+            status("Autorisez une fois le microphone via Android")
             try {
                 startActivity(Intent(this, MicrophonePermissionActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                startingAt = SystemClock.elapsedRealtime()
             } catch (e: Exception) {
-                waitingForRecording = false
-                starting = false
-                report("Impossible de demander l'accès au microphone : " + (e.message ?: "erreur"))
+                status("Microphone non autorisé : " + (e.message ?: "erreur"))
             }
-            updateControls()
             return
         }
+        startingAt = SystemClock.elapsedRealtime()
         try {
             startForegroundService(
                 Intent(this, CaptureService::class.java)
-                    .setAction(CaptureService.START)
-                    .putExtra("source", "keyboard")
+                    .setAction(CaptureService.START).putExtra("source", "keyboard")
             )
-            report("Ouverture du microphone…")
+            status("Ouverture du microphone…")
         } catch (e: Exception) {
-            waitingForRecording = false
-            starting = false
-            report("Le microphone est inaccessible : " + (e.message ?: "erreur Android"))
+            startingAt = 0L
+            status("Impossible d'enregistrer : " + (e.message ?: "erreur"))
         }
         updateControls()
     }
 
-    private fun updateControls() {
-        val button = mic ?: return
-        val active = CaptureService.active
-        val elapsedSeconds = if (active && CaptureService.startedElapsedMs > 0)
-            ((SystemClock.elapsedRealtime() - CaptureService.startedElapsedMs) / 1000).coerceAtLeast(0)
-        else 0
-        val clock = String.format(Locale.FRANCE, "%02d:%02d", elapsedSeconds / 60, elapsedSeconds % 60)
-        button.text = when {
-            active -> "■ Arrêter · $clock"
-            transcriptionRunning -> "Transcription…"
-            starting -> "Micro en cours…"
-            else -> "🎙 Dicter"
+    private fun lastKeyboardSession() = store.all().firstOrNull { it.source == "keyboard" }
+
+    private fun transcribeLatest() {
+        if (sensitive()) { status("Impossible de transcrire dans un champ protégé"); return }
+        if (CaptureService.active || transcribing) return
+        val item = lastKeyboardSession() ?: return
+        if (item.segments.isEmpty()) { status("Enregistrement sans audio exploitable"); return }
+        if (DictationSettings.token(this).length < 20) {
+            status("Configurez une fois l'accès serveur avec ⚙")
+            return
         }
-        button.isEnabled = active || (!transcriptionRunning && !starting)
-        button.backgroundTintList = ColorStateList.valueOf(if (active) recordingRed else accent)
-        button.setTextColor(Color.WHITE)
-        if (active && !transcriptionRunning) {
-            info?.text = "● Enregistrement $clock · vous pouvez verrouiller l'écran"
-        } else if (!waitingForRecording && !transcriptionRunning) {
-            info?.text = statusMessage
+        transcribing = true
+        status("Transcription demandée ; audio original conservé")
+        updateControls()
+        thread(name = "dictee-transcription-manual") {
+            try {
+                Transcriber(this).transcribe(item.id) { progress ->
+                    handler.post { status(progress) }
+                }
+                handler.post {
+                    transcribing = false
+                    status("Texte prêt · touchez Insérer pour le placer au curseur")
+                    updateControls()
+                }
+            } catch (e: Exception) {
+                handler.post {
+                    transcribing = false
+                    status("Audio conservé · transcription impossible : " + (e.message ?: "erreur"))
+                    updateControls()
+                }
+            }
+        }
+    }
+
+    private fun insertLatest() {
+        if (sensitive()) { status("Insertion désactivée dans ce champ protégé"); return }
+        val item = lastKeyboardSession()
+        if (item?.transcript.isNullOrBlank()) {
+            status("Aucune transcription prête à insérer")
+            return
+        }
+        enterText(item!!.transcript)
+        status("Transcription insérée · envoi du message non automatique")
+    }
+
+    private fun updateControls() {
+        val bar = actions ?: return
+        if (bar.childCount == 0) return
+        val active = CaptureService.active
+        val isPaused = CaptureService.paused
+        if (active) startingAt = 0L
+        if (startingAt > 0L && SystemClock.elapsedRealtime() - startingAt > 13000L) {
+            startingAt = 0L
+            status(CaptureService.lastError.ifBlank { "Microphone indisponible. Vérifiez les autorisations." })
+        }
+        if (!active && finishing) {
+            finishing = false
+            status("Audio sauvegardé · choisissez Transcrire lorsque vous le souhaitez")
+        }
+        val latest = if (!active) lastKeyboardSession() else null
+        val hasAudio = latest != null && latest.segments.isNotEmpty()
+        val hasTranscript = !latest?.transcript.isNullOrBlank()
+        val able = !sensitive()
+
+        recordButton?.visibility = if (active) View.GONE else View.VISIBLE
+        recordButton?.isEnabled = able && !transcribing && startingAt == 0L
+        pauseButton?.visibility = if (active) View.VISIBLE else View.GONE
+        pauseButton?.text = if (isPaused) "▶ Reprendre" else "⏸ Pause"
+        stopButton?.visibility = if (active) View.VISIBLE else View.GONE
+        stopButton?.isEnabled = !finishing
+        transcribeButton?.visibility = if (!active && hasAudio && !hasTranscript) View.VISIBLE else View.GONE
+        transcribeButton?.isEnabled = able && !transcribing && latest?.state != "transcribing"
+        transcribeButton?.text = if (transcribing || latest?.state == "transcribing") "En cours…" else "✨ Transcrire"
+        insertButton?.visibility = if (!active && hasTranscript) View.VISIBLE else View.GONE
+        insertButton?.isEnabled = able
+
+        val newSnapshot = listOf(active, isPaused, latest?.id, latest?.state,
+            latest?.transcript?.length, transcribing, finishing).joinToString(":")
+        if (newSnapshot != lastSnapshot) {
+            lastSnapshot = newSnapshot
+            if (!active && !transcribing && !finishing && hasAudio && !hasTranscript &&
+                status == "Dictez ou écrivez votre message") {
+                status("Audio prêt · touchez Transcrire à votre rythme")
+            }
+        }
+        if (active) {
+            val elapsed = CaptureService.recordedDurationMs() / 1000L
+            val timer = String.format(locale, "%02d:%02d", elapsed / 60, elapsed % 60)
+            info?.text = if (isPaused) "⏸ Pause · " + timer + " · audio en sécurité"
+                else "● Enregistrement · " + timer + " · écran verrouillable"
+        } else {
+            info?.text = status
         }
     }
 
     private val tick = object : Runnable {
         override fun run() {
-            if (waitingForRecording && !CaptureService.active && !transcriptionRunning) {
-                val last = store.all().firstOrNull {
-                    it.source == "keyboard" && it.createdAt >= requestTime - 1000L
-                }
-                if (last != null && last.state != "recording" && handledSessionId != last.id) {
-                    handledSessionId = last.id
-                    waitingForRecording = false
-                    starting = false
-                    if (last.state == "ready" && last.segments.isNotEmpty()) {
-                        runTranscription(last.id)
-                    } else report(last.error.ifBlank { "Aucun son sauvegardé" })
-                } else if (starting && System.currentTimeMillis() - requestTime > 12000L) {
-                    starting = false
-                    waitingForRecording = false
-                    report(CaptureService.lastError.ifBlank {
-                        "Microphone non autorisé ; accordez l'accès via ⚙"
-                    })
-                }
-            }
-            if (CaptureService.active) starting = false
             updateControls()
-            handler.postDelayed(this, if (CaptureService.active) 350L else 650L)
-        }
-    }
-
-    private fun runTranscription(id: String) {
-        if (DictationSettings.token(this).length < 20) {
-            report("Audio conservé. Configurez une fois la transcription via ⚙.")
-            return
-        }
-        transcriptionRunning = true
-        report("Enregistrement conservé ; transcription IA en cours…")
-        thread(name = "keyboard-transcription") {
-            try {
-                val result = Transcriber(this).transcribe(id) { progress ->
-                    handler.post { report(progress) }
-                }
-                handler.post {
-                    transcriptionRunning = false
-                    val editor = currentInputEditorInfo
-                    val sameTarget = !editorChanged &&
-                        editor != null &&
-                        editor.packageName == sourcePackage &&
-                        editor.fieldId == sourceFieldId
-                    if (sameTarget && isInputViewShown && currentInputConnection != null && !isProtected()) {
-                        write(result)
-                        report("Texte inséré directement dans votre message")
-                    } else {
-                        report("Dictée retranscrite et sauvegardée. Touchez « Insérer texte ».")
-                    }
-                    updateControls()
-                }
-            } catch (e: Exception) {
-                handler.post {
-                    transcriptionRunning = false
-                    report("Audio conservé ; transcription à réessayer via ⚙ : " +
-                        (e.message ?: "erreur serveur"))
-                    updateControls()
-                }
-            }
+            handler.postDelayed(this, if (CaptureService.active) 350L else 900L)
         }
     }
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
-        if (waitingForRecording && !starting && attribute != null &&
-            (attribute.packageName != sourcePackage || attribute.fieldId != sourceFieldId)) {
-            editorChanged = true
+        page = when (attribute?.inputType?.and(InputType.TYPE_MASK_CLASS)) {
+            InputType.TYPE_CLASS_NUMBER, InputType.TYPE_CLASS_PHONE -> Page.NUMBERS
+            else -> Page.LETTERS
         }
+        shift = Shift.OFF
+        lastSuggestions = ""
     }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
+        super.onStartInputView(info, restarting)
+        if (page == Page.LETTERS && !sensitive() && shift != Shift.LOCK) {
+            val caps = editable()?.getCursorCapsMode(InputType.TYPE_TEXT_FLAG_CAP_SENTENCES) ?: 0
+            if (caps and InputType.TYPE_TEXT_FLAG_CAP_SENTENCES != 0) shift = Shift.ONCE
+        }
+        buildKeys()
+        updateControls()
+    }
+
+    override fun onUpdateSelection(
+        oldSelStart: Int, oldSelEnd: Int, newSelStart: Int,
+        newSelEnd: Int, candidatesStart: Int, candidatesEnd: Int
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd
+        )
+        handler.post { refreshSuggestions() }
+    }
+
     override fun onWindowShown() {
         super.onWindowShown()
         handler.removeCallbacks(tick)
         handler.post(tick)
         Updates.check(this)
     }
+
     override fun onWindowHidden() {
         handler.removeCallbacks(tick)
         super.onWindowHidden()
     }
+
     override fun onDestroy() {
         handler.removeCallbacks(tick)
-        // Ne coupe pas l'audio : CaptureService continue si l'écran est verrouillé.
+        // Un enregistrement lancé par l'utilisateur continue dans le foreground service.
         super.onDestroy()
     }
 }

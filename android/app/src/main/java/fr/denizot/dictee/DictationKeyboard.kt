@@ -789,7 +789,6 @@ class DictationKeyboard : InputMethodService() {
         super.onWindowShown()
         handler.removeCallbacks(tick)
         handler.post(tick)
-        Updates.check(this)
     }
 
     override fun onWindowHidden() {

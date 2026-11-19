@@ -123,6 +123,7 @@ class MainActivity : Activity() {
         root.addView(text("MES DICTÉES", 16f, true))
         history = column(); root.addView(history)
         setContentView(scroll)
+        store.recoverAbandonedSessions()
         refreshHistory()
         refreshKeyboardStatus()
         Updates.schedule(this)

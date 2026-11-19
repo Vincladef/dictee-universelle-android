@@ -96,7 +96,7 @@ class DictationKeyboard : InputMethodService() {
                 title.length > 3 -> 14f
                 else -> 19f
             }
-            setTextColor(foreground)
+            setTextColor(this@DictationKeyboard.foreground)
             minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
             setPadding(0, 0, 0, 0)
             background = bg(if (accent) primary else if (special) utilityColor else keyColor)
@@ -147,7 +147,7 @@ class DictationKeyboard : InputMethodService() {
     override fun onCreateInputView(): View {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(background)
+            setBackgroundColor(this@DictationKeyboard.background)
             setPadding(dp(3), dp(4), dp(3), dp(7))
         }
         root = container

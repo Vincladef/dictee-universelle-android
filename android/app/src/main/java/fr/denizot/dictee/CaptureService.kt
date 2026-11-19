@@ -23,6 +23,7 @@ class CaptureService : Service() {
         const val CHANNEL = "microphone"
         const val NOTIFICATION_ID = 81
         @Volatile var active = false
+        @Volatile var startedElapsedMs: Long = 0L
         @Volatile var lastError = ""
     }
     private val store by lazy { SessionStore(this) }
@@ -64,12 +65,13 @@ class CaptureService : Service() {
             lastError = ""; terminating = false
             current = store.newSession(source)
             startedElapsed = SystemClock.elapsedRealtime()
+            startedElapsedMs = startedElapsed
             startPart()
             active = true
         } catch (e: Exception) {
             lastError = "Enregistrement impossible : ${e.message}"
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
-            releaseRecorder(); active = false; stopSelf()
+            releaseRecorder(); active = false; startedElapsedMs = 0L; stopSelf()
         }
     }
     private fun startPart() {
@@ -132,7 +134,7 @@ class CaptureService : Service() {
             lastError = "Finalisation incomplète : ${e.message}"
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
         } finally {
-            active = false; current = null
+            active = false; startedElapsedMs = 0L; current = null
             stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
         }
     }

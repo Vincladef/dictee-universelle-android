@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var recorderButton: Button
     private lateinit var history: LinearLayout
+    private lateinit var keyboardStatus: TextView
     private lateinit var updateStatus: TextView
     private lateinit var updateButton: Button
     private lateinit var endpointField: EditText
@@ -70,6 +71,8 @@ class MainActivity : Activity() {
         root.addView(recorderButton)
         root.addView(text("L'enregistrement reste actif écran verrouillé. Arrêtez-le depuis cette page ou la notification.", 13f))
         root.addView(text("CLAVIER DE DICTÉE", 14f, true))
+        keyboardStatus = text("Vérification du clavier actif…", 13f)
+        root.addView(keyboardStatus)
         root.addView(button("Activer le clavier") { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) })
         root.addView(button("Choisir le clavier actif") {
             (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
@@ -114,6 +117,7 @@ class MainActivity : Activity() {
         history = column(); root.addView(history)
         setContentView(scroll)
         refreshHistory()
+        refreshKeyboardStatus()
         Updates.schedule(this)
         refreshUpdateUi()
         Updates.check(this) { state ->
@@ -128,6 +132,17 @@ class MainActivity : Activity() {
             }
         })
     }
+    private fun refreshKeyboardStatus() {
+        val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
+        val enabled = manager.enabledInputMethodList.any { it.packageName == packageName }
+        val selected = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD) ?: ""
+        keyboardStatus.text = when {
+            selected.startsWith("$packageName/") && selected.contains("DictationKeyboard") ->
+                "✓ Dictée universelle est le clavier actif"
+            enabled -> "Clavier installé et autorisé ; touchez « Choisir le clavier actif » pour remplacer Gboard"
+            else -> "Clavier installé mais désactivé ; touchez « Activer le clavier »"
+        }
+    }
     private fun refreshUpdateUi() {
         val version = Updates.ready(this)
         if (version != null) updateStatus.text = "Version ${version.first} téléchargée et prête à installer"
@@ -135,6 +150,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::updateStatus.isInitialized) refreshUpdateUi()
+        if (::keyboardStatus.isInitialized) refreshKeyboardStatus()
     }
     private fun updateRecordingUi() {
         recorderButton.text = if (CaptureService.active) "Terminer et conserver la dictée" else "Démarrer l'enregistrement"

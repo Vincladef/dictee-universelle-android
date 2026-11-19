@@ -156,6 +156,7 @@ class DictationKeyboard : InputMethodService() {
             setPadding(dp(3), dp(4), dp(3), dp(7))
         }
         root = container
+        store.recoverAbandonedSessions()
         info = TextView(this).apply {
             text = status
             textSize = 12f

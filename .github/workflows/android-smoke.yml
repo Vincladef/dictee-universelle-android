@@ -7,7 +7,7 @@ on:
       - '.github/workflows/android-smoke.yml'
 jobs:
   runtime:
-    runs-on: ubuntu-latest
+    runs-on: macos-15-intel
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4

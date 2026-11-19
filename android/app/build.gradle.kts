@@ -10,6 +10,26 @@ android {
         versionCode = 3
         versionName = "0.3.0"
     }
+
+    signingConfigs {
+        create("ota") {
+            val keystore = System.getenv("DICTEE_KEYSTORE_PATH")
+            val password = System.getenv("DICTEE_SIGNING_PASSWORD")
+            if (!keystore.isNullOrBlank() && !password.isNullOrBlank()) {
+                storeFile = file(keystore)
+                storePassword = password
+                keyAlias = "dictee"
+                keyPassword = password
+                storeType = "PKCS12"
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            signingConfig = signingConfigs.getByName("ota")
+            isMinifyEnabled = false
+        }
+    }
     buildFeatures { buildConfig = true }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }

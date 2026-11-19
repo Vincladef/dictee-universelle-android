@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var status: TextView
     private lateinit var recorderButton: Button
+    private lateinit var pauseButton: Button
     private lateinit var history: LinearLayout
     private lateinit var keyboardStatus: TextView
     private lateinit var updateStatus: TextView
@@ -69,7 +70,13 @@ class MainActivity : Activity() {
         root.addView(status)
         recorderButton = button("Démarrer l'enregistrement") { if (CaptureService.active) stopRecording() else askAndRecord() }
         root.addView(recorderButton)
-        root.addView(text("L'enregistrement reste actif écran verrouillé. Arrêtez-le depuis cette page ou la notification.", 13f))
+        pauseButton = button("Pause") {
+            startService(Intent(this, CaptureService::class.java).setAction(if (CaptureService.paused) CaptureService.RESUME else CaptureService.PAUSE))
+            handler.postDelayed({ updateRecordingUi() }, 250)
+        }
+        pauseButton.visibility = View.GONE
+        root.addView(pauseButton)
+        root.addView(text("Enregistrez, mettez en pause, reprenez ou arrêtez ; la transcription reste manuelle après la sauvegarde.", 13f))
         root.addView(text("CLAVIER DE DICTÉE", 14f, true))
         keyboardStatus = text("Vérification du clavier actif…", 13f)
         root.addView(keyboardStatus)
@@ -153,8 +160,11 @@ class MainActivity : Activity() {
         if (::keyboardStatus.isInitialized) refreshKeyboardStatus()
     }
     private fun updateRecordingUi() {
-        recorderButton.text = if (CaptureService.active) "Terminer et conserver la dictée" else "Démarrer l'enregistrement"
+        recorderButton.text = if (CaptureService.active) "Arrêter et sauvegarder (sans transcrire)" else "Démarrer l'enregistrement"
+        pauseButton.visibility = if (CaptureService.active) View.VISIBLE else View.GONE
+        pauseButton.text = if (CaptureService.paused) "▶ Reprendre l'enregistrement" else "⏸ Mettre en pause"
         status.text = when {
+            CaptureService.active && CaptureService.paused -> "⏸ Enregistrement en pause · audio préservé"
             CaptureService.active -> "● Enregistrement actif, même écran verrouillé"
             CaptureService.lastError.isNotBlank() -> CaptureService.lastError
             else -> "Microphone inactif"
@@ -199,9 +209,9 @@ class MainActivity : Activity() {
             if (item.transcript.isNotBlank()) {
                 panel.addView(text(item.transcript.take(450) + (if (item.transcript.length > 450) "…" else ""), 14f))
             }
-            if (item.segments.isNotEmpty() && item.state != "recording") {
+            if (item.segments.isNotEmpty() && item.state != "recording" && item.state != "paused" && item.state != "transcribing") {
                 panel.addView(button("Écouter l'audio") { playSegments(item) })
-                if (item.state != "done") panel.addView(button("Transcrire avec l'IA") { transcribe(item.id) })
+                if (item.state != "done") panel.addView(button("✨ Transcrire avec l'IA (à la demande)") { transcribe(item.id) })
             }
             if (item.transcript.isNotBlank()) {
                 panel.addView(button("Copier le texte") {

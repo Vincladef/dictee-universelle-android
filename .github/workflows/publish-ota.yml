@@ -1,0 +1,87 @@
+name: Publier une mise à jour Android signée
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publier:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12.1'
+      - name: Installer Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Préparer la signature privée
+        env:
+          SIGNING_B64: ${{ secrets.DICTEE_SIGNING_KEYSTORE_B64 }}
+          SIGNING_PASSWORD: ${{ secrets.DICTEE_SIGNING_PASSWORD }}
+        run: |
+          if [ -z "$SIGNING_B64" ] || [ -z "$SIGNING_PASSWORD" ]; then
+            echo "::error::Ajouter les secrets de signature Android au dépôt privé."
+            exit 1
+          fi
+          printf '%s' "$SIGNING_B64" | base64 --decode > "$RUNNER_TEMP/dictee-release.p12"
+          chmod 600 "$RUNNER_TEMP/dictee-release.p12"
+      - name: Compiler la version signée
+        working-directory: android
+        env:
+          DICTEE_KEYSTORE_PATH: ${{ runner.temp }}/dictee-release.p12
+          DICTEE_SIGNING_PASSWORD: ${{ secrets.DICTEE_SIGNING_PASSWORD }}
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Vérifier la signature
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+          sha256sum android/app/build/outputs/apk/release/app-release.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dictee-universelle-ota-signee
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+      - name: Publier la version et le manifeste
+        env:
+          GH_TOKEN: ${{ secrets.DICTEE_DISTRIBUTION_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::Ajouter DICTEE_DISTRIBUTION_TOKEN avec accès Contents écriture au dépôt public de mises à jour."
+            exit 1
+          fi
+          set -euo pipefail
+          REPO="Vincladef/dictee-universelle-updates"
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          CODE="$(grep -Po 'versionCode = \K[0-9]+' android/app/build.gradle.kts | head -1)"
+          VERSION="$(grep -Po 'versionName = "\K[^"]+' android/app/build.gradle.kts | head -1)"
+          TAG="v${VERSION}"
+          SHA="$(sha256sum "$APK" | awk '{print $1}')"
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$APK#dictee-universelle.apk" --clobber --repo "$REPO"
+          else
+            gh release create "$TAG" "$APK#dictee-universelle.apk" --repo "$REPO" \
+              --title "Dictée universelle $VERSION" \
+              --notes "Mise à jour Android signée du clavier de dictée."
+          fi
+          export CODE VERSION TAG SHA
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = dict(
+              versionCode=int(os.environ["CODE"]),
+              versionName=os.environ["VERSION"],
+              apkUrl="https://github.com/Vincladef/dictee-universelle-updates/releases/download/" +
+                     os.environ["TAG"] + "/dictee-universelle.apk",
+              sha256=os.environ["SHA"])
+          Path("latest.json").write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+          PY
+          CURRENT_SHA="$(gh api "repos/$REPO/contents/latest.json" --jq .sha)"
+          ENCODED="$(base64 -w 0 latest.json)"
+          gh api -X PUT "repos/$REPO/contents/latest.json" \
+            -f message="Publier Dictée universelle $VERSION" \
+            -f content="$ENCODED" -f sha="$CURRENT_SHA" >/dev/null

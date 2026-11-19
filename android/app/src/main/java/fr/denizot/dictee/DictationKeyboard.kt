@@ -363,6 +363,11 @@ class DictationKeyboard : InputMethodService() {
 
     private fun deleteOne() {
         val connection = editable() ?: return
+        if (sensitive()) {
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL))
+            connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL))
+            return
+        }
         val selected = connection.getSelectedText(0)
         val extracted = connection.getExtractedText(ExtractedTextRequest(), 0)
         if (!selected.isNullOrEmpty() ||
@@ -436,9 +441,9 @@ class DictationKeyboard : InputMethodService() {
                     repeats = 0
                     val connection = editable()
                     val extracted = connection?.getExtractedText(ExtractedTextRequest(), 0)
-                    cursorAtDown = extracted?.selectionEnd ?: -1
-                    selectedAtDown = !connection?.getSelectedText(0).isNullOrEmpty()
-                    before = connection?.getTextBeforeCursor(280, 0)?.toString().orEmpty()
+                    cursorAtDown = if (sensitive()) -1 else extracted?.selectionEnd ?: -1
+                    selectedAtDown = if (sensitive()) false else !connection?.getSelectedText(0).isNullOrEmpty()
+                    before = if (sensitive()) "" else connection?.getTextBeforeCursor(280, 0)?.toString().orEmpty()
                     handler.postDelayed(firstDelete, 65L)
                     view.isPressed = true
                     true
@@ -515,6 +520,7 @@ class DictationKeyboard : InputMethodService() {
 
     private fun writeSpace() {
         val connection = editable() ?: return
+        if (sensitive()) { connection.commitText(" ", 1); return }
         val selected = connection.getSelectedText(0)
         if (!selected.isNullOrEmpty()) {
             enterText(" ")
@@ -693,7 +699,7 @@ class DictationKeyboard : InputMethodService() {
         stopButton?.visibility = if (active) View.VISIBLE else View.GONE
         stopButton?.isEnabled = !finishing
         transcribeButton?.visibility = if (!active && hasAudio && !hasTranscript) View.VISIBLE else View.GONE
-        transcribeButton?.isEnabled = able && !transcribing
+        transcribeButton?.isEnabled = able && !transcribing && latest?.state != "transcribing"
         transcribeButton?.text = if (transcribing || latest?.state == "transcribing") "En cours…" else "✨ Transcrire"
         insertButton?.visibility = if (!active && hasTranscript) View.VISIBLE else View.GONE
         insertButton?.isEnabled = able

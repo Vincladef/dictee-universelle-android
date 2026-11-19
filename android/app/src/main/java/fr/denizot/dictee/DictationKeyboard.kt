@@ -2,6 +2,7 @@ package fr.denizot.dictee
 
 import android.Manifest
 import android.content.Intent
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -564,6 +565,15 @@ class DictationKeyboard : InputMethodService() {
         if (snapshot == lastSuggestions && target.childCount > 0) return
         lastSuggestions = snapshot
         target.removeAllViews()
+        val clipboard = key(target, "📋", 0.72f, special = true) {
+            val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = manager.primaryClip
+            val value = if (clip != null && clip.itemCount > 0)
+                clip.getItemAt(0).coerceToText(this).toString() else ""
+            if (value.isNotEmpty()) enterText(value)
+            else status("Presse-papiers vide")
+        }
+        clipboard.layoutParams.height = dp(36)
         if (sensitive()) {
             val text = TextView(this).apply {
                 text = "Saisie protégée · aucune dictée ni prédiction"
@@ -571,7 +581,7 @@ class DictationKeyboard : InputMethodService() {
                 setTextColor(secondary)
                 setPadding(dp(10), dp(9), 0, dp(9))
             }
-            target.addView(text)
+            target.addView(text, LinearLayout.LayoutParams(0, dp(36), 3f))
             return
         }
         val proposals = KeyboardLexicon.candidates(prefix)
@@ -582,7 +592,7 @@ class DictationKeyboard : InputMethodService() {
                 setTextColor(secondary)
                 setPadding(dp(10), dp(8), 0, dp(8))
             }
-            target.addView(hint)
+            target.addView(hint, LinearLayout.LayoutParams(0, dp(36), 3f))
             return
         }
         proposals.forEach { proposal ->

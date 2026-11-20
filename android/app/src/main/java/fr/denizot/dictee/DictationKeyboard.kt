@@ -8,13 +8,16 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.icu.text.BreakIterator
 import android.inputmethodservice.InputMethodService
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.view.Gravity
 import android.view.HapticFeedbackConstants
+import android.view.SoundEffectConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -23,6 +26,7 @@ import android.view.inputmethod.ExtractedTextRequest
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.PopupMenu
+import android.widget.PopupWindow
 import android.widget.TextView
 import android.widget.Toast
 import java.util.Locale
@@ -62,6 +66,10 @@ class DictationKeyboard : InputMethodService() {
     private var status = "Dictez ou écrivez votre message"
     private var lastSnapshot = ""
     private var lastSuggestions = ""
+    private var pendingInsertId: String? = null
+    private var inputGeneration = 0L
+    private var keyPreview: PopupWindow? = null
+    private val idleStatus = "Dictez ou écrivez votre message"
 
     private val dark get() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
         Configuration.UI_MODE_NIGHT_YES
@@ -83,13 +91,63 @@ class DictationKeyboard : InputMethodService() {
         target.addView(this, LinearLayout.LayoutParams(-1, -2))
     }
 
+    /** Fond reactif natif : il se colore des le premier contact, sans attendre le clic. */
+    private fun touchBackground(base: Int): StateListDrawable = StateListDrawable().apply {
+        val pressed = when (base) {
+            primary -> if (dark) Color.rgb(142, 180, 255) else Color.rgb(83, 135, 226)
+            else -> if (dark) Color.rgb(108, 116, 131) else Color.rgb(182, 194, 216)
+        }
+        addState(intArrayOf(android.R.attr.state_pressed), bg(pressed))
+        addState(intArrayOf(), bg(base))
+    }
+
+    private fun hidePreview() {
+        keyPreview?.dismiss()
+        keyPreview = null
+    }
+
+    private fun showPreview(anchor: View, letter: String) {
+        hidePreview()
+        val bubble = TextView(this).apply {
+            text = letter
+            textSize = 27f
+            gravity = Gravity.CENTER
+            setTextColor(Color.WHITE)
+            background = bg(primary)
+        }
+        val popup = PopupWindow(bubble, dp(54), dp(60), false).apply {
+            isClippingEnabled = false
+            elevation = dp(5).toFloat()
+        }
+        val location = IntArray(2)
+        anchor.getLocationOnScreen(location)
+        val x = (location[0] + (anchor.width - dp(54)) / 2)
+            .coerceIn(0, (resources.displayMetrics.widthPixels - dp(54)).coerceAtLeast(0))
+        val y = (location[1] - dp(65)).coerceAtLeast(0)
+        try {
+            popup.showAtLocation(anchor, Gravity.TOP or Gravity.START, x, y)
+            keyPreview = popup
+        } catch (_: Exception) {
+            popup.dismiss() // Le champ peut perdre le focus pendant un changement de clavier.
+        }
+    }
+
+    private fun tactileDown(view: View, label: String, preview: Boolean = true) {
+        view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        view.playSoundEffect(SoundEffectConstants.CLICK) // Suit les preferences sonores Android.
+        if (preview && label.length == 1 && label[0].isLetterOrDigit()) {
+            showPreview(view, label)
+        }
+    }
+
     private fun key(
         row: LinearLayout, title: String, width: Float = 1f,
-        special: Boolean = false, accent: Boolean = false,
+        special: Boolean = false, accent: Boolean = false, height: Int = 47,
         action: () -> Unit
     ): Button {
         val button = Button(this).apply {
             text = title
+            contentDescription = title
             isAllCaps = false
             textSize = when {
                 title.length > 11 -> 10.5f
@@ -100,16 +158,22 @@ class DictationKeyboard : InputMethodService() {
             setTextColor(this@DictationKeyboard.foreground)
             minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
             setPadding(0, 0, 0, 0)
-            background = bg(if (accent) primary else if (special) utilityColor else keyColor)
+            backgroundTintList = null
+            background = touchBackground(if (accent) primary else if (special) utilityColor else keyColor)
             if (accent) setTextColor(Color.WHITE)
             stateListAnimator = null
-            setOnClickListener {
-                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                action()
+            elevation = 0f
+            setOnTouchListener { view, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> tactileDown(view, title)
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> hidePreview()
+                }
+                false // Laisse Android declencher le clic et les actions d'accessibilite.
             }
+            setOnClickListener { action() }
         }
-        row.addView(button, LinearLayout.LayoutParams(0, dp(47), width).apply {
-            setMargins(dp(2), dp(3), dp(2), dp(3))
+        row.addView(button, LinearLayout.LayoutParams(0, dp(height), width).apply {
+            setMargins(dp(2), dp(2), dp(2), dp(2))
         })
         return button
     }
@@ -125,6 +189,17 @@ class DictationKeyboard : InputMethodService() {
     private fun status(value: String) {
         status = value
         info?.text = value
+        info?.visibility = if (value == idleStatus) View.GONE else View.VISIBLE
+    }
+
+    private fun restoreIdleStatus() {
+        handler.postDelayed({
+            if (!CaptureService.active && !transcribing &&
+                status.startsWith("Texte inséré")) {
+                status(idleStatus)
+                updateControls()
+            }
+        }, 2200L)
     }
 
     /** Passwords are typeable; only reading, learning and voice insertion are blocked. */
@@ -153,16 +228,17 @@ class DictationKeyboard : InputMethodService() {
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(this@DictationKeyboard.background)
-            setPadding(dp(3), dp(4), dp(3), dp(7))
+            setPadding(dp(3), dp(2), dp(3), dp(4))
         }
         root = container
         store.recoverAbandonedSessions()
         info = TextView(this).apply {
             text = status
-            textSize = 12f
+            textSize = 11f
             setTextColor(secondary)
             setPadding(dp(9), 0, dp(6), dp(3))
-            maxLines = 2
+            maxLines = 1
+            visibility = View.GONE
         }
         container.addView(info)
         actions = line(container)
@@ -178,28 +254,40 @@ class DictationKeyboard : InputMethodService() {
     private fun buildActions() {
         val bar = actions ?: return
         bar.removeAllViews()
-        recordButton = key(bar, "🎙 Dicter", 2.2f, accent = true) { startRecording() }
-        pauseButton = key(bar, "⏸ Pause", 1.8f, special = true) {
+        recordButton = key(bar, "🎙", 1.1f, accent = true, height = 43) { startRecording() }
+            .apply { contentDescription = "Demarrer la dictee"; tooltipText = "Dicter" }
+        pauseButton = key(bar, "⏸", 1f, special = true, height = 43) {
             if (CaptureService.paused) command(CaptureService.RESUME)
             else command(CaptureService.PAUSE)
-        }
-        stopButton = key(bar, "■ Arrêter", 1.9f, special = true) {
+        }.apply { contentDescription = "Mettre en pause ou reprendre"; tooltipText = "Pause / Reprendre" }
+        stopButton = key(bar, "■", 1f, special = true, height = 43) {
             finishing = true
             status("Sauvegarde de l'audio…")
             command(CaptureService.STOP)
-        }
-        transcribeButton = key(bar, "✨ Transcrire", 2.4f, accent = true) { transcribeLatest() }
-        insertButton = key(bar, "Insérer", 1.65f, accent = true) { insertLatest() }
-        key(bar, "⚙", 0.66f, special = true) {
+        }.apply { contentDescription = "Arreter et sauvegarder l'audio"; tooltipText = "Arreter" }
+        transcribeButton = key(bar, "✍", 1.2f, accent = true, height = 43) {
+            transcribeLatest()
+        }.apply { contentDescription = "Transcrire et inserer automatiquement"; tooltipText = "Transcrire et inserer" }
+        insertButton = key(bar, "⇥", 1f, accent = true, height = 43) {
+            insertLatest()
+        }.apply { contentDescription = "Inserer le texte dans le champ actif"; tooltipText = "Inserer le texte" }
+        key(bar, "▤", 0.95f, special = true, height = 43) {
+            val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = manager.primaryClip
+            val value = if (clip != null && clip.itemCount > 0)
+                clip.getItemAt(0).coerceToText(this).toString() else ""
+            if (value.isNotEmpty()) enterText(value) else status("Presse-papiers vide")
+        }.apply { contentDescription = "Coller depuis le presse-papiers"; tooltipText = "Presse-papiers" }
+        key(bar, "⚙", 0.95f, special = true, height = 43) {
             startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        }
-        key(bar, "🌐", 0.66f, special = true) {
+        }.apply { contentDescription = "Parametres de dictee"; tooltipText = "Parametres" }
+        key(bar, "🌐", 0.95f, special = true, height = 43) {
             try { switchToNextInputMethod(false) }
             catch (_: Exception) {
                 (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
                     .showInputMethodPicker()
             }
-        }
+        }.apply { contentDescription = "Changer de clavier"; tooltipText = "Changer de clavier" }
     }
 
     private fun buildKeys() {
@@ -452,6 +540,7 @@ class DictationKeyboard : InputMethodService() {
                     before = if (sensitive()) "" else connection?.getTextBeforeCursor(280, 0)?.toString().orEmpty()
                     handler.postDelayed(firstDelete, 65L)
                     view.isPressed = true
+                    tactileDown(view, "⌫", preview = false)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -495,6 +584,7 @@ class DictationKeyboard : InputMethodService() {
                     previousStep = 0
                     moved = false
                     view.isPressed = true
+                    tactileDown(view, "espace", preview = false)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -558,46 +648,20 @@ class DictationKeyboard : InputMethodService() {
         refreshSuggestions()
     }
 
+    /** Suggestions utiles uniquement ; pas de ligne d'aide permanente. */
     private fun refreshSuggestions() {
         val target = suggestions ?: return
         val previousText = if (sensitive()) "" else editable()?.getTextBeforeCursor(80, 0)?.toString().orEmpty()
         val prefix = KeyboardLexicon.currentWord(previousText)
         val snapshot = if (sensitive()) "protected" else prefix.lowercase(locale)
-        if (snapshot == lastSuggestions && target.childCount > 0) return
+        if (snapshot == lastSuggestions) return
         lastSuggestions = snapshot
         target.removeAllViews()
-        val clipboard = key(target, "📋", 0.72f, special = true) {
-            val manager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-            val clip = manager.primaryClip
-            val value = if (clip != null && clip.itemCount > 0)
-                clip.getItemAt(0).coerceToText(this).toString() else ""
-            if (value.isNotEmpty()) enterText(value)
-            else status("Presse-papiers vide")
-        }
-        clipboard.layoutParams.height = dp(36)
-        if (sensitive()) {
-            val text = TextView(this).apply {
-                text = "Saisie protégée · aucune dictée ni prédiction"
-                textSize = 12f
-                setTextColor(secondary)
-                setPadding(dp(10), dp(9), 0, dp(9))
-            }
-            target.addView(text, LinearLayout.LayoutParams(0, dp(36), 3f))
-            return
-        }
-        val proposals = KeyboardLexicon.candidates(prefix)
-        if (proposals.isEmpty()) {
-            val hint = TextView(this).apply {
-                text = "Français  ·  Maintenez une lettre pour les accents"
-                textSize = 12f
-                setTextColor(secondary)
-                setPadding(dp(10), dp(8), 0, dp(8))
-            }
-            target.addView(hint, LinearLayout.LayoutParams(0, dp(36), 3f))
-            return
-        }
+        val proposals = if (!sensitive() && prefix.length >= 2) KeyboardLexicon.candidates(prefix)
+            else emptyList()
+        target.visibility = if (proposals.isEmpty()) View.GONE else View.VISIBLE
         proposals.forEach { proposal ->
-            val chip = key(target, proposal, 1f, special = false) {
+            val chip = key(target, proposal, 1f, height = 30) {
                 val connection = editable() ?: return@key
                 val before = connection.getTextBeforeCursor(80, 0)?.toString().orEmpty()
                 val current = KeyboardLexicon.currentWord(before)
@@ -608,11 +672,11 @@ class DictationKeyboard : InputMethodService() {
                         connection.deleteSurroundingTextInCodePoints(current.codePointCount(0, current.length), 0)
                     connection.commitText(proposal + " ", 1)
                 } finally { connection.endBatchEdit() }
+                lastSuggestions = ""
                 refreshSuggestions()
             }
             chip.textSize = 13f
             chip.setTypeface(null, Typeface.BOLD)
-            chip.layoutParams.height = dp(37)
         }
     }
 
@@ -628,6 +692,7 @@ class DictationKeyboard : InputMethodService() {
     private fun startRecording() {
         if (sensitive()) { status("Dictée désactivée dans les champs de mot de passe"); return }
         if (CaptureService.active || startingAt > 0L || transcribing) return
+        pendingInsertId = null
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             status("Autorisez une fois le microphone via Android")
             try {
@@ -655,6 +720,15 @@ class DictationKeyboard : InputMethodService() {
 
     private fun lastKeyboardSession() = store.all().firstOrNull { it.source == "keyboard" }
 
+    /** Ne jamais inserer apres un changement de champ pendant l'appel reseau. */
+    private fun insertIfStillFocused(text: String, generation: Long): Boolean {
+        if (generation != inputGeneration || sensitive()) return false
+        val connection = editable() ?: return false
+        val ok = runCatching { connection.commitText(text, 1) }.getOrDefault(false)
+        if (ok) refreshSuggestions()
+        return ok
+    }
+
     private fun transcribeLatest() {
         if (sensitive()) { status("Impossible de transcrire dans un champ protégé"); return }
         if (CaptureService.active || transcribing) return
@@ -664,18 +738,24 @@ class DictationKeyboard : InputMethodService() {
             status("Configurez une fois l'accès serveur avec ⚙")
             return
         }
+        val originalInput = inputGeneration
         transcribing = true
-        status("Transcription demandée ; audio original conservé")
+        pendingInsertId = null
+        status("Transcription en cours…")
         updateControls()
         thread(name = "dictee-transcription-manual") {
             try {
-                Transcriber(this).transcribe(item.id) { progress ->
+                val text = Transcriber(this).transcribe(item.id) { progress ->
                     handler.post { status(progress) }
                 }
                 handler.post {
                     transcribing = false
-                    status("Texte prêt · touchez Insérer pour le placer au curseur")
+                    val inserted = text.isNotBlank() && insertIfStillFocused(text, originalInput)
+                    pendingInsertId = if (inserted) null else item.id
+                    status(if (inserted) "Texte inséré · message non envoyé"
+                        else "Texte prêt · choisissez un champ et touchez ⇥")
                     updateControls()
+                    if (inserted) restoreIdleStatus()
                 }
             } catch (e: Exception) {
                 handler.post {
@@ -687,15 +767,25 @@ class DictationKeyboard : InputMethodService() {
         }
     }
 
+    /** Secours uniquement si le champ initial a disparu ou refuse l'insertion. */
     private fun insertLatest() {
         if (sensitive()) { status("Insertion désactivée dans ce champ protégé"); return }
-        val item = lastKeyboardSession()
+        val item = pendingInsertId?.let { store.get(it) }
         if (item?.transcript.isNullOrBlank()) {
-            status("Aucune transcription prête à insérer")
+            status("Aucun texte en attente")
             return
         }
-        enterText(item!!.transcript)
-        status("Transcription insérée · envoi du message non automatique")
+        val inserted = runCatching { editable()?.commitText(item!!.transcript, 1) == true }
+            .getOrDefault(false)
+        if (inserted) {
+            pendingInsertId = null
+            refreshSuggestions()
+            status("Texte inséré · message non envoyé")
+            restoreIdleStatus()
+        } else {
+            status("Sélectionnez un champ de texte pour insérer la dictée")
+        }
+        updateControls()
     }
 
     private fun updateControls() {
@@ -720,13 +810,14 @@ class DictationKeyboard : InputMethodService() {
         recordButton?.visibility = if (active) View.GONE else View.VISIBLE
         recordButton?.isEnabled = able && !transcribing && startingAt == 0L
         pauseButton?.visibility = if (active) View.VISIBLE else View.GONE
-        pauseButton?.text = if (isPaused) "▶ Reprendre" else "⏸ Pause"
+        pauseButton?.text = if (isPaused) "▶" else "⏸"
+        pauseButton?.contentDescription = if (isPaused) "Reprendre la dictée" else "Mettre la dictée en pause"
         stopButton?.visibility = if (active) View.VISIBLE else View.GONE
         stopButton?.isEnabled = !finishing
         transcribeButton?.visibility = if (!active && hasAudio && !hasTranscript) View.VISIBLE else View.GONE
         transcribeButton?.isEnabled = able && !transcribing && latest?.state != "transcribing"
-        transcribeButton?.text = if (transcribing || latest?.state == "transcribing") "En cours…" else "✨ Transcrire"
-        insertButton?.visibility = if (!active && hasTranscript) View.VISIBLE else View.GONE
+        transcribeButton?.text = if (transcribing || latest?.state == "transcribing") "…" else "✍"
+        insertButton?.visibility = if (!active && pendingInsertId != null) View.VISIBLE else View.GONE
         insertButton?.isEnabled = able
 
         val newSnapshot = listOf(active, isPaused, latest?.id, latest?.state,
@@ -746,6 +837,7 @@ class DictationKeyboard : InputMethodService() {
         } else {
             info?.text = status
         }
+        info?.visibility = if (active || status != idleStatus) View.VISIBLE else View.GONE
     }
 
     private val tick = object : Runnable {
@@ -757,6 +849,7 @@ class DictationKeyboard : InputMethodService() {
 
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        inputGeneration++ // Interdit une insertion automatique dans une autre zone de saisie.
         page = when (attribute?.inputType?.and(InputType.TYPE_MASK_CLASS)) {
             InputType.TYPE_CLASS_NUMBER, InputType.TYPE_CLASS_PHONE -> Page.NUMBERS
             else -> Page.LETTERS
@@ -793,11 +886,13 @@ class DictationKeyboard : InputMethodService() {
 
     override fun onWindowHidden() {
         handler.removeCallbacks(tick)
+        hidePreview()
         super.onWindowHidden()
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(tick)
+        hidePreview()
         // Un enregistrement lancé par l'utilisateur continue dans le foreground service.
         super.onDestroy()
     }

@@ -132,9 +132,9 @@ class DictationKeyboard : InputMethodService() {
         }
     }
 
-    private fun tactileDown(view: View, label: String, preview: Boolean = true) {
+    private fun tactileDown(view: View, label: String, preview: Boolean = true, sound: Boolean = false) {
         view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-        view.playSoundEffect(SoundEffectConstants.CLICK) // Suit les preferences sonores Android.
+        if (sound) view.playSoundEffect(SoundEffectConstants.CLICK) // Evite le double clic sonore des Button.
         if (preview && label.length == 1 && label[0].isLetterOrDigit()) {
             showPreview(view, label)
         }
@@ -540,7 +540,7 @@ class DictationKeyboard : InputMethodService() {
                     before = if (sensitive()) "" else connection?.getTextBeforeCursor(280, 0)?.toString().orEmpty()
                     handler.postDelayed(firstDelete, 65L)
                     view.isPressed = true
-                    tactileDown(view, "⌫", preview = false)
+                    tactileDown(view, "⌫", preview = false, sound = true)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -584,7 +584,7 @@ class DictationKeyboard : InputMethodService() {
                     previousStep = 0
                     moved = false
                     view.isPressed = true
-                    tactileDown(view, "espace", preview = false)
+                    tactileDown(view, "espace", preview = false, sound = true)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {

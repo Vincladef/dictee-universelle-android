@@ -26,7 +26,7 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".test"
+            applicationIdSuffix = ".testv05"
             versionNameSuffix = "-test"
         }
         getByName("release") {

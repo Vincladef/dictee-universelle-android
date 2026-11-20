@@ -1,0 +1,50 @@
+name: Android runtime smoke test
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'android/**'
+      - '.github/workflows/android-smoke.yml'
+jobs:
+  runtime:
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12.1'
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Build debug APK
+        working-directory: android
+        run: gradle --no-daemon :app:assembleDebug
+      - name: Boot emulator and test real Android launch
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          profile: pixel_4
+          target: default
+          ram-size: 2048M
+          heap-size: 512M
+          emulator-boot-timeout: 900
+          disable-animations: true
+          script: bash .github/scripts/android-runtime-smoke.sh
+      - name: Preserve crash diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-runtime-diagnostics
+          path: |
+            android-smoke-logcat.txt
+            android-smoke-activity.txt
+            android-smoke-screenshot.png
+          if-no-files-found: ignore

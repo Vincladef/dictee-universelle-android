@@ -855,7 +855,7 @@ class DictationKeyboard : InputMethodService() {
             else -> Page.LETTERS
         }
         shift = Shift.OFF
-        lastSuggestions = ""
+        lastSuggestions = "__new_editor__" // Force la suppression des suggestions de l’ancien champ.
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {

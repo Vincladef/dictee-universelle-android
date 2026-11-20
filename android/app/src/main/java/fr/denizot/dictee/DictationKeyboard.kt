@@ -135,7 +135,7 @@ class DictationKeyboard : InputMethodService() {
     private fun tactileDown(view: View, label: String, preview: Boolean = true, sound: Boolean = false) {
         view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         if (sound) view.playSoundEffect(SoundEffectConstants.CLICK) // Evite le double clic sonore des Button.
-        if (preview && label.length == 1 && label[0].isLetterOrDigit()) {
+        if (preview && !sensitive() && label.length == 1 && label[0].isLetterOrDigit()) {
             showPreview(view, label)
         }
     }

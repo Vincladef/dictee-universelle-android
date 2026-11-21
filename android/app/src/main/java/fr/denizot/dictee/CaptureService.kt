@@ -126,7 +126,7 @@ class CaptureService : Service() {
                         @Suppress("DEPRECATION")
                         mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
                     } ?: return super.onMediaButtonEvent(mediaButtonIntent)
-                    val supported = key.keyCode == KeyEvent.KEYCODE_HEADSETOOK ||
+                    val supported = key.keyCode == KeyEvent.KEYCODE_HEADSETHOOK ||
                         key.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
                         key.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
                         key.keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE

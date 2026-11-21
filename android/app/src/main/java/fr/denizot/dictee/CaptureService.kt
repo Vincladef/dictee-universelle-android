@@ -10,9 +10,12 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.MediaRecorder
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import android.os.SystemClock
+import android.view.KeyEvent
 import java.io.File
 
 /** Service audio unique : PAUSE conserve la session, STOP sauvegarde sans transcrire. */
@@ -52,6 +55,7 @@ class CaptureService : Service() {
     private var recorder: MediaRecorder? = null
     private var currentFile: File? = null
     private var terminating = false
+    private var mediaSession: MediaSession? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -83,6 +87,7 @@ class CaptureService : Service() {
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
+            .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
             .addAction(
                 Notification.Action.Builder(
@@ -97,6 +102,73 @@ class CaptureService : Service() {
                 ).build()
             )
             .build()
+    }
+
+    /**
+     * MediaSession receives wired/Bluetooth headset transport controls even when the
+     * keyboard is hidden and the screen is locked. The service remains the only
+     * authority for the recorder state. A music player may take media-key priority.
+     */
+    private fun createMediaSession() {
+        if (mediaSession != null) return
+        mediaSession = MediaSession(this, "Dictee microphone").apply {
+            setFlags(
+                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or
+                    MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+            )
+            setCallback(object : MediaSession.Callback() {
+                override fun onMediaButtonEvent(mediaButtonIntent: Intent): Boolean {
+                    val key = if (Build.VERSION.SDK_INT >= 33) {
+                        mediaButtonIntent.getParcelableExtra(
+                            Intent.EXTRA_KEY_EVENT, KeyEvent::class.java
+                        )
+                    } else {
+                        @Suppress("DEPRECATION")
+                        mediaButtonIntent.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+                    } ?: return super.onMediaButtonEvent(mediaButtonIntent)
+                    val supported = key.keyCode == KeyEvent.KEYCODE_HEADSETOOK ||
+                        key.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
+                        key.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY ||
+                        key.keyCode == KeyEvent.KEYCODE_MEDIA_PAUSE
+                    if (!supported) return super.onMediaButtonEvent(mediaButtonIntent)
+                    // A press is a pair of ACTION_DOWN / ACTION_UP. Never toggle twice.
+                    if (key.action != KeyEvent.ACTION_DOWN || key.repeatCount > 0) return true
+                    when (key.keyCode) {
+                        KeyEvent.KEYCODE_MEDIA_PLAY -> resumeRecording()
+                        KeyEvent.KEYCODE_MEDIA_PAUSE -> pauseRecording()
+                        else -> if (paused) resumeRecording() else pauseRecording()
+                    }
+                    return true
+                }
+
+                override fun onPlay() = resumeRecording()
+                override fun onPause() = pauseRecording()
+            })
+            isActive = true
+        }
+        updateMediaSessionState()
+    }
+
+    private fun updateMediaSessionState() {
+        mediaSession?.setPlaybackState(
+            PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_PLAY_PAUSE
+                )
+                .setState(
+                    if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
+                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                    if (paused) 0f else 1f
+                )
+                .build()
+        )
+    }
+
+    private fun releaseMediaSession() {
+        mediaSession?.isActive = false
+        mediaSession?.release()
+        mediaSession = null
     }
 
     private fun updateNotification() {
@@ -136,11 +208,13 @@ class CaptureService : Service() {
             startedElapsedMs = SystemClock.elapsedRealtime()
             startPart()
             active = true
+            createMediaSession()
             updateNotification()
         } catch (e: Exception) {
             lastError = "Enregistrement impossible : " + (e.message ?: "erreur")
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
             releaseRecorder()
+            releaseMediaSession()
             clearStatus()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -153,6 +227,7 @@ class CaptureService : Service() {
             recorder?.pause() ?: error("Enregistreur indisponible")
             pauseStartedElapsedMs = SystemClock.elapsedRealtime()
             paused = true
+            updateMediaSessionState()
             current?.let { it.state = "paused"; store.save(it) }
             updateNotification()
         } catch (e: Exception) {
@@ -167,6 +242,7 @@ class CaptureService : Service() {
             pausedElapsedMs += (SystemClock.elapsedRealtime() - pauseStartedElapsedMs).coerceAtLeast(0)
             pauseStartedElapsedMs = 0L
             paused = false
+            updateMediaSessionState()
             current?.let { it.state = "recording"; store.save(it) }
             updateNotification()
         } catch (e: Exception) {
@@ -241,6 +317,7 @@ class CaptureService : Service() {
             lastError = "Sauvegarde incomplète : " + (e.message ?: "erreur")
             current?.let { it.state = "interrupted"; it.error = lastError; store.save(it) }
         } finally {
+            releaseMediaSession()
             clearStatus()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
@@ -259,6 +336,7 @@ class CaptureService : Service() {
 
     override fun onDestroy() {
         if (active && !terminating) stopRecording(interrupted = true)
+        releaseMediaSession()
         super.onDestroy()
     }
 }

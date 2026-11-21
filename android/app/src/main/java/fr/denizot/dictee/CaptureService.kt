@@ -9,7 +9,13 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.RectF
 import android.media.MediaRecorder
+import android.media.MediaMetadata
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
@@ -27,6 +33,7 @@ class CaptureService : Service() {
         const val STOP = "fr.denizot.dictee.STOP"
         const val CHANNEL = "microphone_controls_v2"
         const val TOGGLE = "fr.denizot.dictee.TOGGLE"
+        const val REFRESH_NOTIFICATION = "fr.denizot.dictee.REFRESH_NOTIFICATION"
         const val NOTIFICATION_ID = 81
 
         @Volatile var active = false
@@ -78,24 +85,49 @@ class CaptureService : Service() {
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
 
-    private fun notification(): Notification {
+    /**
+     * A visible cover image makes the recording state recognizable in Android's
+     * system-owned media card. No sound is played and the audio recorder is unchanged.
+     */
+    private fun recordingArtwork(isPaused: Boolean): Bitmap {
+        val size = 256
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        canvas.drawColor(if (isPaused) Color.rgb(91, 97, 112) else Color.rgb(175, 49, 54))
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+        if (isPaused) {
+            canvas.drawRoundRect(84f, 73f, 112f, 183f, 6f, 6f, paint)
+            canvas.drawRoundRect(144f, 73f, 172f, 183f, 6f, 6f, paint)
+        } else {
+            canvas.drawRoundRect(104f, 51f, 152f, 158f, 24f, 24f, paint)
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 12f
+            paint.strokeCap = Paint.Cap.ROUND
+            canvas.drawArc(RectF(82f, 98f, 174f, 194f), 0f, 180f, false, paint)
+            canvas.drawLine(128f, 194f, 128f, 216f, paint)
+            canvas.drawLine(102f, 217f, 154f, 217f, paint)
+        }
+        return bitmap
+    }
+
+    private fun notificationBuilder(): Notification.Builder {
+        val isPaused = paused
         val open = PendingIntent.getActivity(
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val isPaused = paused
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle(if (isPaused) "Dictée en pause" else "Dictée en cours")
+            .setContentTitle("Dictée universelle")
             .setContentText(
-                if (isPaused) "Reprendre ou terminer depuis la notification"
-                else "L'enregistrement continue avec l'écran verrouillé"
+                if (isPaused) "En pause · touchez Reprendre pour continuer"
+                else "Microphone actif · touchez Pause pour suspendre"
             )
+            .setSubText(if (isPaused) "EN PAUSE" else "ENREGISTREMENT")
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_SERVICE)
             .setPriority(Notification.PRIORITY_DEFAULT)
-            .setShowWhen(true)
-            .setWhen(System.currentTimeMillis())
+            .setShowWhen(false)
             .setOngoing(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
@@ -111,7 +143,28 @@ class CaptureService : Service() {
                     android.R.drawable.ic_media_next, "Arrêter et sauvegarder", pending(STOP, 3)
                 ).build()
             )
-            .build()
+    }
+
+    /** Two presentation modes; a standard notification remains available at all times. */
+    private fun notification(): Notification {
+        val ordinary = notificationBuilder()
+        val token = mediaSession?.sessionToken
+        if (!NotificationMode.mediaStyleEnabled(this) || token == null) {
+            return ordinary.build()
+        }
+        return try {
+            ordinary
+                .setLargeIcon(recordingArtwork(paused))
+                .setStyle(
+                    Notification.MediaStyle()
+                        .setMediaSession(token)
+                        .setShowActionsInCompactView(0, 1)
+                )
+                .build()
+        } catch (_: RuntimeException) {
+            // A vendor can reject a media-style layout. Preserve all direct actions.
+            notificationBuilder().build()
+        }
     }
 
     /**
@@ -143,12 +196,20 @@ class CaptureService : Service() {
                     if (!supported) return super.onMediaButtonEvent(mediaButtonIntent)
                     // A press is a pair of ACTION_DOWN / ACTION_UP. Never toggle twice.
                     if (key.action != KeyEvent.ACTION_DOWN || key.repeatCount > 0) return true
-                    toggleRecording()
+                    when (key.keyCode) {
+                        KeyEvent.KEYCODE_MEDIA_PLAY -> resumeRecording()
+                        KeyEvent.KEYCODE_MEDIA_PAUSE -> pauseRecording()
+                        else -> toggleRecording()
+                    }
                     return true
                 }
 
-                override fun onPlay() = toggleRecording()
-                override fun onPause() = toggleRecording()
+                override fun onPlay() = resumeRecording()
+                override fun onPause() = pauseRecording()
+                override fun onStop() = stopRecording()
+                override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
+                    if (action == STOP) stopRecording()
+                }
             })
             isActive = true
         }
@@ -156,17 +217,31 @@ class CaptureService : Service() {
     }
 
     private fun updateMediaSessionState() {
-        mediaSession?.setPlaybackState(
-            PlaybackState.Builder()
-                .setActions(
-                    PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
-                        PlaybackState.ACTION_PLAY_PAUSE
+        val state = PlaybackState.Builder()
+            .setActions(
+                PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+                    PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_STOP
+            )
+            .addCustomAction(
+                PlaybackState.CustomAction.Builder(
+                    STOP, "Arrêter et sauvegarder", android.R.drawable.ic_media_next
+                ).build()
+            )
+            .setState(
+                if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
+                PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                if (paused) 0f else 1f
+            )
+            .build()
+        mediaSession?.setPlaybackState(state)
+        mediaSession?.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, "Dictée universelle")
+                .putString(
+                    MediaMetadata.METADATA_KEY_ARTIST,
+                    if (paused) "En pause" else "Enregistrement du microphone"
                 )
-                .setState(
-                    if (paused) PlaybackState.STATE_PAUSED else PlaybackState.STATE_PLAYING,
-                    PlaybackState.PLAYBACK_POSITION_UNKNOWN,
-                    if (paused) 0f else 1f
-                )
+                .putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, recordingArtwork(paused))
                 .build()
         )
     }
@@ -187,6 +262,7 @@ class CaptureService : Service() {
             PAUSE -> pauseRecording()
             RESUME -> resumeRecording()
             TOGGLE -> toggleRecording()
+            REFRESH_NOTIFICATION -> if (active) updateNotification()
             STOP -> stopRecording()
         }
         return START_NOT_STICKY
@@ -200,6 +276,9 @@ class CaptureService : Service() {
                 stopSelf()
                 return
             }
+            // MediaStyle needs the active MediaSession token before the initial
+            // foreground notification is built. Audio starts only after FGS setup.
+            createMediaSession()
             if (Build.VERSION.SDK_INT >= 29) {
                 startForeground(NOTIFICATION_ID, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             } else {
@@ -215,7 +294,7 @@ class CaptureService : Service() {
             startedElapsedMs = SystemClock.elapsedRealtime()
             startPart()
             active = true
-            createMediaSession()
+            updateMediaSessionState()
             updateNotification()
         } catch (e: Exception) {
             lastError = "Enregistrement impossible : " + (e.message ?: "erreur")

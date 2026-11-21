@@ -35,6 +35,7 @@ class MainActivity : Activity() {
     private lateinit var recorderButton: Button
     private lateinit var pauseButton: Button
     private lateinit var notificationStatus: TextView
+    private lateinit var notificationModeButton: Button
     private lateinit var headsetStatus: TextView
     private lateinit var history: LinearLayout
     private lateinit var keyboardStatus: TextView
@@ -89,6 +90,22 @@ class MainActivity : Activity() {
             }
         })
         root.addView(button("Afficher les réglages de notification") { openNotificationSettings() })
+        root.addView(text(
+            "Essai du panneau multimédia : commandes compactes avec état du microphone. " +
+                "Si Motorola les affiche mal, reviens immédiatement à la notification classique.",
+            13f
+        ))
+        notificationModeButton = button("Chargement du mode de notification…") {
+            NotificationMode.setMediaStyleEnabled(
+                this, !NotificationMode.mediaStyleEnabled(this)
+            )
+            updateRemoteControlsUi()
+            if (CaptureService.active) {
+                startService(Intent(this, CaptureService::class.java)
+                    .setAction(CaptureService.REFRESH_NOTIFICATION))
+            }
+        }
+        root.addView(notificationModeButton)
         root.addView(text("ÉCOUTEURS : COMMANDE RENFORCÉE (FACULTATIVE)", 14f, true))
         root.addView(text("Android donne parfois les boutons Play/Pause au dernier lecteur audio. Ce mode utilise une autorisation d'accessibilité pour intercepter la touche pendant la dictée. Il n'analyse ni le texte ni le contenu des écrans ; l'autorisation reste toutefois étendue et doit être activée par vous.", 13f))
         headsetStatus = text("Vérification de la commande…", 13f)
@@ -185,6 +202,13 @@ class MainActivity : Activity() {
             channel != null && channel.importance == android.app.NotificationManager.IMPORTANCE_NONE ->
                 "Le canal « Commandes de dictée » est désactivé. Réactive-le dans les réglages."
             else -> "Notifications autorisées. Leur affichage sur l'écran verrouillé dépend aussi des réglages Motorola."
+        }
+        if (::notificationModeButton.isInitialized) {
+            notificationModeButton.text = if (NotificationMode.mediaStyleEnabled(this)) {
+                "Présentation : panneau multimédia (toucher pour revenir au classique)"
+            } else {
+                "Présentation : notification classique (toucher pour essayer le panneau)"
+            }
         }
         headsetStatus.text = if (HeadsetKeyService.connected) {
             "Commande renforcée active. Dernière touche : " + HeadsetKeyService.lastKeyDescription

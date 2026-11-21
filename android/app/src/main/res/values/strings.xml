@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="headset_control_label">Dictée : boutons des écouteurs</string>
-    <string name="headset_control_description">Commande facultative : utilise les touches lecture et pause des écouteurs pendant une dictée. N'analyse pas le texte ni les écrans. Désactivable dans Accessibilité.</string>
+    <string name="headset_control_description">Commande facultative : utilise les touches lecture et pause des écouteurs pendant une dictée. N\'analyse pas le texte ni les écrans. Désactivable dans Accessibilité.</string>
 </resources>

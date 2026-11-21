@@ -207,7 +207,7 @@ class CaptureService : Service() {
                 override fun onPlay() = resumeRecording()
                 override fun onPause() = pauseRecording()
                 override fun onStop() = stopRecording()
-                override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
+                override fun onCustomAction(action: String, extras: android.os.Bundle?) {
                     if (action == STOP) stopRecording()
                 }
             })

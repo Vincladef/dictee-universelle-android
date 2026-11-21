@@ -34,6 +34,8 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var recorderButton: Button
     private lateinit var pauseButton: Button
+    private lateinit var notificationStatus: TextView
+    private lateinit var headsetStatus: TextView
     private lateinit var history: LinearLayout
     private lateinit var keyboardStatus: TextView
     private lateinit var endpointField: EditText
@@ -75,6 +77,25 @@ class MainActivity : Activity() {
         pauseButton.visibility = View.GONE
         root.addView(pauseButton)
         root.addView(text("Enregistrez, mettez en pause, reprenez ou arrêtez ; la transcription reste manuelle après la sauvegarde.", 13f))
+        root.addView(text("COMMANDES SUR ÉCRAN VERROUILLÉ", 14f, true))
+        notificationStatus = text("Vérification des notifications…", 13f)
+        root.addView(notificationStatus)
+        root.addView(button("Autoriser les notifications") {
+            if (Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 102)
+            } else {
+                openNotificationSettings()
+            }
+        })
+        root.addView(button("Afficher les réglages de notification") { openNotificationSettings() })
+        root.addView(text("ÉCOUTEURS : COMMANDE RENFORCÉE (FACULTATIVE)", 14f, true))
+        root.addView(text("Android donne parfois les boutons Play/Pause au dernier lecteur audio. Ce mode utilise une autorisation d'accessibilité pour intercepter la touche pendant la dictée. Il n'analyse ni le texte ni le contenu des écrans ; l'autorisation reste toutefois étendue et doit être activée par vous.", 13f))
+        headsetStatus = text("Vérification de la commande…", 13f)
+        root.addView(headsetStatus)
+        root.addView(button("Configurer la commande des écouteurs") {
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        })
         root.addView(text("CLAVIER DE DICTÉE", 14f, true))
         keyboardStatus = text("Vérification du clavier actif…", 13f)
         root.addView(keyboardStatus)
@@ -113,6 +134,7 @@ class MainActivity : Activity() {
         handler.post(object : Runnable {
             override fun run() {
                 updateRecordingUi()
+                updateRemoteControlsUi()
                 val snapshot = store.all().joinToString(";") { "${it.id}:${it.state}:${it.segments.size}:${it.transcript.length}" }
                 if (snapshot != lastSnapshot) { lastSnapshot = snapshot; refreshHistory() }
                 handler.postDelayed(this, 1300)
@@ -133,6 +155,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::keyboardStatus.isInitialized) refreshKeyboardStatus()
+        if (::notificationStatus.isInitialized) updateRemoteControlsUi()
     }
     private fun updateRecordingUi() {
         recorderButton.text = if (CaptureService.active) "Arrêter et sauvegarder (sans transcrire)" else "Démarrer l'enregistrement"
@@ -145,14 +168,42 @@ class MainActivity : Activity() {
             else -> "Microphone inactif"
         }
     }
+    private fun openNotificationSettings() {
+        startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        })
+    }
+
+    private fun updateRemoteControlsUi() {
+        val notificationsAllowed = Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        val notificationManager = getSystemService(android.app.NotificationManager::class.java)
+        val channel = notificationManager.getNotificationChannel(CaptureService.CHANNEL)
+        notificationStatus.text = when {
+            !notificationsAllowed -> "Notifications non autorisées. Active-les pour afficher Pause/Reprendre."
+            !notificationManager.areNotificationsEnabled() -> "Notifications coupées pour l'application."
+            channel != null && channel.importance == android.app.NotificationManager.IMPORTANCE_NONE ->
+                "Le canal « Commandes de dictée » est désactivé. Réactive-le dans les réglages."
+            else -> "Notifications autorisées. Leur affichage sur l'écran verrouillé dépend aussi des réglages Motorola."
+        }
+        headsetStatus.text = if (HeadsetKeyService.connected) {
+            "Commande renforcée active. Dernière touche : " + HeadsetKeyService.lastKeyDescription
+        } else {
+            "Commande renforcée inactive. Pour l'activer : Paramètres > Accessibilité > Dictée : boutons des écouteurs."
+        }
+    }
+
     private fun askAndRecord() {
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 101); return
         }
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 102)
-            // Microphone permission is already granted; starting does not depend on notification consent.
+            return
         }
+        startForegroundCapture()
+    }
+    private fun startForegroundCapture() {
         try { startForegroundService(Intent(this, CaptureService::class.java).setAction(CaptureService.START).putExtra("source", "app")) }
         catch (e: Exception) { toast("Le service audio n'a pas démarré : ${e.message}") }
         handler.postDelayed({ updateRecordingUi() }, 400)
@@ -160,6 +211,13 @@ class MainActivity : Activity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 101 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) askAndRecord()
+        if (requestCode == 102) {
+            if (grantResults.firstOrNull() != PackageManager.PERMISSION_GRANTED) {
+                toast("Notifications refusées. Les commandes sur écran verrouillé peuvent rester invisibles.")
+            }
+            updateRemoteControlsUi()
+            startForegroundCapture()
+        }
     }
     private fun stopRecording() {
         startService(Intent(this, CaptureService::class.java).setAction(CaptureService.STOP))

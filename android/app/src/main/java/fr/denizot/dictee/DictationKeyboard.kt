@@ -693,8 +693,10 @@ class DictationKeyboard : InputMethodService() {
         if (sensitive()) { status("Dictée désactivée dans les champs de mot de passe"); return }
         if (CaptureService.active || startingAt > 0L || transcribing) return
         pendingInsertId = null
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            status("Autorisez une fois le microphone via Android")
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED ||
+            (android.os.Build.VERSION.SDK_INT >= 33 &&
+                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)) {
+            status("Vérification des autorisations micro et notifications")
             try {
                 startActivity(Intent(this, MicrophonePermissionActivity::class.java)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))

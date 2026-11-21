@@ -25,7 +25,8 @@ class CaptureService : Service() {
         const val PAUSE = "fr.denizot.dictee.PAUSE"
         const val RESUME = "fr.denizot.dictee.RESUME"
         const val STOP = "fr.denizot.dictee.STOP"
-        const val CHANNEL = "microphone"
+        const val CHANNEL = "microphone_controls_v2"
+        const val TOGGLE = "fr.denizot.dictee.TOGGLE"
         const val NOTIFICATION_ID = 81
 
         @Volatile var active = false
@@ -62,7 +63,13 @@ class CaptureService : Service() {
     override fun onCreate() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Dictée en cours", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL, "Commandes de dictée", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "Pause et reprise de la dictée depuis l'écran verrouillé"
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                enableVibration(false)
+                setSound(null, null)
+                setShowBadge(false)
+            }
         )
     }
 
@@ -86,6 +93,9 @@ class CaptureService : Service() {
             )
             .setContentIntent(open)
             .setCategory(Notification.CATEGORY_SERVICE)
+            .setPriority(Notification.PRIORITY_DEFAULT)
+            .setShowWhen(true)
+            .setWhen(System.currentTimeMillis())
             .setOngoing(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
@@ -133,16 +143,12 @@ class CaptureService : Service() {
                     if (!supported) return super.onMediaButtonEvent(mediaButtonIntent)
                     // A press is a pair of ACTION_DOWN / ACTION_UP. Never toggle twice.
                     if (key.action != KeyEvent.ACTION_DOWN || key.repeatCount > 0) return true
-                    when (key.keyCode) {
-                        KeyEvent.KEYCODE_MEDIA_PLAY -> resumeRecording()
-                        KeyEvent.KEYCODE_MEDIA_PAUSE -> pauseRecording()
-                        else -> if (paused) resumeRecording() else pauseRecording()
-                    }
+                    toggleRecording()
                     return true
                 }
 
-                override fun onPlay() = resumeRecording()
-                override fun onPause() = pauseRecording()
+                override fun onPlay() = toggleRecording()
+                override fun onPause() = toggleRecording()
             })
             isActive = true
         }
@@ -180,6 +186,7 @@ class CaptureService : Service() {
             START -> if (!active && !terminating) startRecording(intent.getStringExtra("source") ?: "app")
             PAUSE -> pauseRecording()
             RESUME -> resumeRecording()
+            TOGGLE -> toggleRecording()
             STOP -> stopRecording()
         }
         return START_NOT_STICKY
@@ -219,6 +226,11 @@ class CaptureService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
+    }
+
+    @Synchronized private fun toggleRecording() {
+        if (!active || terminating) return
+        if (paused) resumeRecording() else pauseRecording()
     }
 
     @Synchronized private fun pauseRecording() {

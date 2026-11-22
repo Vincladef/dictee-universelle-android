@@ -1,9 +1,28 @@
 import { get, put } from "@vercel/blob";
 import {
-  authorized, headers, json, sameOrigin, validId, parseBody, readMetadata, writeMetadata,
+  authorized, headers, json, sameOrigin, validId, readMetadata, writeMetadata,
   allMetadata, MAX_AUDIO_BYTES,
 } from "../lib/server";
 
+export const config = { api: { bodyParser: false }, maxDuration: 60 };
+async function rawBody(req: any, maximum: number): Promise<Buffer> {
+  if (Buffer.isBuffer(req.body)) return req.body;
+  if (typeof req.body === "string") return Buffer.from(req.body, "binary");
+  const pieces: Buffer[] = [];
+  let size = 0;
+  for await (const part of req) {
+    const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part);
+    size += chunk.length;
+    if (size > maximum) throw new Error("too_large");
+    pieces.push(chunk);
+  }
+  return Buffer.concat(pieces);
+}
+async function jsonBody(req: any): Promise<any> {
+  const raw = await rawBody(req, 200_000);
+  if (raw.length > 200_000) throw new Error("too_large");
+  return JSON.parse(raw.toString("utf8"));
+}
 const STATES = new Set(["ready", "done", "failed", "interrupted"]);
 function smallString(value: unknown, size: number): string {
   return typeof value === "string" ? value.slice(0, size) : "";
@@ -41,9 +60,7 @@ export default async function handler(req: any, res: any) {
       const size = Number(req.headers["content-length"] || 0);
       if (!Number.isFinite(size) || size < 128 || size > MAX_AUDIO_BYTES)
         return json(res, 413, { error: "Segment trop volumineux" });
-      const data = Buffer.isBuffer(req.body) ? req.body :
-        typeof req.body === "string" ? Buffer.from(req.body, "binary") :
-        Buffer.from(req.body || []);
+      const data = await rawBody(req, MAX_AUDIO_BYTES);
       if (data.length !== size || data.length > MAX_AUDIO_BYTES || data.toString("ascii", 4, 8) !== "ftyp")
         return json(res, 400, { error: "Fichier M4A invalide" });
       await put("audio/" + id + "/" + index + ".m4a", data, {
@@ -52,7 +69,7 @@ export default async function handler(req: any, res: any) {
       return json(res, 200, { ok: true });
     }
     if (action === "upsert" && req.method === "POST") {
-      const input = parseBody(req);
+      const input = await jsonBody(req);
       if (!validId(input.id)) return json(res, 400, { error: "ID invalide" });
       const count = Number(input.segmentsCount);
       if (!Number.isInteger(count) || count < 1 || count > 1000 ||
@@ -72,7 +89,7 @@ export default async function handler(req: any, res: any) {
       return json(res, 200, { ok: true });
     }
     if (action === "update-summary" && req.method === "POST") {
-      const input = parseBody(req);
+      const input = await jsonBody(req);
       if (!validId(input.id)) return json(res, 400, { error: "ID invalide" });
       const metadata = await readMetadata(input.id);
       if (!metadata) return json(res, 404, { error: "Dictée inconnue" });
@@ -82,7 +99,7 @@ export default async function handler(req: any, res: any) {
       return json(res, 200, { summary: metadata.summary });
     }
     if (action === "generate-summary" && req.method === "POST") {
-      const input = parseBody(req);
+      const input = await jsonBody(req);
       if (!validId(input.id)) return json(res, 400, { error: "ID invalide" });
       const metadata = await readMetadata(input.id);
       if (!metadata || !metadata.transcript) return json(res, 400, { error: "Transcription nécessaire" });

@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'android/**'
+      - '.github/scripts/android-runtime-smoke.sh'
       - '.github/workflows/android-smoke.yml'
 jobs:
   runtime:

@@ -1,4 +1,5 @@
 name: Valider une APK de production signée
+# Builds the actual release application using the persistent certificate, not a debug variant.
 on:
   workflow_dispatch:
   push:

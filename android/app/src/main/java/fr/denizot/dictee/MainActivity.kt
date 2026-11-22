@@ -43,6 +43,10 @@ class MainActivity : Activity() {
     private lateinit var notificationModeButton: Button
     private lateinit var headsetStatus: TextView
     private lateinit var history: LinearLayout
+    private lateinit var syncEndpointField: EditText
+    private lateinit var syncTokenField: EditText
+    private lateinit var syncStatus: TextView
+    private lateinit var syncToggle: Button
     private lateinit var keyboardStatus: TextView
     private lateinit var endpointField: EditText
     private lateinit var tokenField: EditText
@@ -156,10 +160,64 @@ class MainActivity : Activity() {
                 toast("Paramètres enregistrés")
             }
         })
+        root.addView(text("SYNCHRONISATION VERS ORDINATEUR", 14f, true))
+        root.addView(text("Désactivée par défaut. Une fois activée, les audios sauvegardés et leurs transcriptions seront envoyés sur votre espace privé en Wi-Fi ; ils resteront disponibles sur le téléphone.", 13f))
+        syncStatus = text("Chargement des paramètres…", 13f)
+        root.addView(syncStatus)
+        root.addView(text("Adresse HTTPS de la bibliothèque (/api/library)", 13f))
+        syncEndpointField = EditText(this).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(SyncConfig.url(this@MainActivity))
+        }
+        root.addView(syncEndpointField)
+        root.addView(text("Code personnel de synchronisation (32 caractères minimum)", 13f))
+        syncTokenField = EditText(this).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(SyncConfig.token(this@MainActivity))
+        }
+        root.addView(syncTokenField)
+        root.addView(button("Enregistrer les paramètres de synchronisation") {
+            val endpoint = syncEndpointField.text.toString().trim()
+            val code = syncTokenField.text.toString().trim()
+            if (!endpoint.startsWith("https://") || !endpoint.endsWith("/api/library") || code.length < 32)
+                toast("Adresse /api/library HTTPS et code de 32 caractères requis")
+            else {
+                SyncConfig.save(this, endpoint, code)
+                toast("Paramètres enregistrés")
+                updateSyncUi()
+            }
+        })
+        syncToggle = button("Activer la synchronisation") {
+            val enable = !SyncConfig.enabled(this)
+            if (enable && (SyncConfig.url(this).isBlank() || SyncConfig.token(this).length < 32)) {
+                toast("Enregistrez d'abord l'adresse et le code"); return@button
+            }
+            SyncConfig.enable(this, enable)
+            if (enable) { AudioSync.schedulePeriodic(this); AudioSync.scheduleOnce(this) }
+            else AudioSync.cancel(this)
+            updateSyncUi()
+        }
+        root.addView(syncToggle)
+        root.addView(button("Synchroniser maintenant") {
+            if (!SyncConfig.enabled(this)) { toast("Activez d'abord la synchronisation"); return@button }
+            syncStatus.text = "Connexion à la bibliothèque…"
+            thread(name = "dictee-manual-sync") {
+                val result = runCatching {
+                    AudioSync.sync(this) { message -> runOnUiThread { syncStatus.text = message } }
+                }
+                runOnUiThread {
+                    if (result.isFailure) syncStatus.text = "Échec : " + (result.exceptionOrNull()?.message ?: "Erreur")
+                }
+            }
+        })
+        updateSyncUi()
         root.addView(text("MES DICTÉES", 16f, true))
         history = column(); root.addView(history)
         setContentView(scroll)
         store.recoverAbandonedSessions()
+        AudioSync.schedulePeriodic(this)
         refreshHistory()
         refreshKeyboardStatus()
         handler.post(object : Runnable {
@@ -182,6 +240,12 @@ class MainActivity : Activity() {
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("pendingExportId", pendingExportId)
         super.onSaveInstanceState(outState)
+    }
+    private fun updateSyncUi() {
+        syncToggle.text = if (SyncConfig.enabled(this)) "Désactiver la synchronisation"
+            else "Activer la synchronisation"
+        syncStatus.text = if (SyncConfig.enabled(this)) "Synchronisation activée (Wi-Fi)"
+            else "Synchronisation désactivée ; vos audios restent uniquement sur cet appareil."
     }
     private fun refreshKeyboardStatus() {
         val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager

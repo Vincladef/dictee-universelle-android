@@ -403,6 +403,7 @@ class CaptureService : Service() {
                 session.state = if (interrupted || session.segments.isEmpty()) "interrupted" else "ready"
                 if (session.segments.isEmpty() && session.error.isBlank()) session.error = "Aucun audio exploitable"
                 store.save(session)
+                AudioSync.scheduleOnce(this)
             }
         } catch (e: Exception) {
             lastError = "Sauvegarde incomplète : " + (e.message ?: "erreur")

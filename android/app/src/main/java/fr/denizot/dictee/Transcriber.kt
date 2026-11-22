@@ -50,6 +50,7 @@ class Transcriber(private val context: Context) {
             }
             item.transcript = item.segmentTexts.joinToString(" ").trim()
             item.state = "done"; store.save(item)
+            AudioSync.scheduleOnce(context)
             onProgress("Transcription terminée")
             return item.transcript
         } catch (e: Exception) {

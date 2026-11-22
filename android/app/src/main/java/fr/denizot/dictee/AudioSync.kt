@@ -23,7 +23,18 @@ object SyncConfig {
         prefs(context).edit().putString("url", url.trim()).putString("token", token.trim()).apply()
     }
     fun enable(context: Context, value: Boolean) {
-        prefs(context).edit().putBoolean("enabled", value).apply()
+        prefs(context).edit().putBoolean("enabled", value)
+            .remove("scheduling_error").apply()
+    }
+    fun schedulingError(context: Context): String =
+        prefs(context).getString("scheduling_error", "") ?: ""
+    fun suspendAfterSchedulingError(context: Context) {
+        // Never allow an optional network feature to crash the keyboard or main screen.
+        prefs(context).edit()
+            .putBoolean("enabled", false)
+            .putString("scheduling_error",
+                "Synchronisation suspendue : Android n'a pas accepté sa planification.")
+            .apply()
     }
     fun fingerprint(context: Context, key: String) = prefs(context).getString("sent:" + key, "")
     fun markSent(context: Context, key: String, value: String) {
@@ -36,26 +47,44 @@ object AudioSync {
     private const val JOB_ONCE = 2209
     private const val SIX_HOURS = 6L * 60L * 60L * 1000L
     fun cancel(context: Context) {
-        val scheduler = context.getSystemService(JobScheduler::class.java)
-        scheduler.cancel(JOB_PERIODIC)
-        scheduler.cancel(JOB_ONCE)
+        // A user choosing to stop sync must never lose access to local recordings.
+        try {
+            val scheduler = context.getSystemService(JobScheduler::class.java)
+            scheduler.cancel(JOB_PERIODIC)
+            scheduler.cancel(JOB_ONCE)
+        } catch (_: RuntimeException) {
+            // Failed cancellation is non-fatal; the scheduled job also checks enabled.
+        }
     }
-    fun schedulePeriodic(context: Context) {
-        if (!SyncConfig.enabled(context)) return
-        val scheduler = context.getSystemService(JobScheduler::class.java)
-        val job = JobInfo.Builder(JOB_PERIODIC, ComponentName(context, AudioSyncJob::class.java))
+    private fun scheduleSafely(context: Context, info: JobInfo): Boolean {
+        return try {
+            val scheduler = context.getSystemService(JobScheduler::class.java)
+            if (scheduler.schedule(info) == JobScheduler.RESULT_SUCCESS) true
+            else {
+                SyncConfig.suspendAfterSchedulingError(context)
+                false
+            }
+        } catch (_: RuntimeException) {
+            // Includes SecurityException on Android 14+ if ACCESS_NETWORK_STATE is absent.
+            SyncConfig.suspendAfterSchedulingError(context)
+            false
+        }
+    }
+    fun schedulePeriodic(context: Context): Boolean {
+        if (!SyncConfig.enabled(context)) return false
+        val info = JobInfo.Builder(JOB_PERIODIC, ComponentName(context, AudioSyncJob::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
             .setPeriodic(SIX_HOURS)
             .build()
-        scheduler.schedule(job)
+        return scheduleSafely(context, info)
     }
-    fun scheduleOnce(context: Context) {
-        if (!SyncConfig.enabled(context)) return
-        val job = JobInfo.Builder(JOB_ONCE, ComponentName(context, AudioSyncJob::class.java))
+    fun scheduleOnce(context: Context): Boolean {
+        if (!SyncConfig.enabled(context)) return false
+        val info = JobInfo.Builder(JOB_ONCE, ComponentName(context, AudioSyncJob::class.java))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_UNMETERED)
             .setMinimumLatency(1000L)
             .build()
-        context.getSystemService(JobScheduler::class.java).schedule(job)
+        return scheduleSafely(context, info)
     }
     /** Upload finalized fragments first; publish metadata only when every fragment succeeded. */
     fun sync(context: Context, canContinue: () -> Boolean = { true }, report: (String) -> Unit = {}): Int {

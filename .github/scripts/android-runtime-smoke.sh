@@ -34,3 +34,28 @@ if ! adb shell pidof "$PACKAGE" | grep -Eq '[0-9]'; then
   exit 1
 fi
 echo "PASS: MainActivity running after seven seconds on Android API 34"
+
+# Regression: reproduce the user's state, with cloud sync already enabled on launch.
+# Android 14 requires ACCESS_NETWORK_STATE for network-constrained JobScheduler jobs.
+# The previous production APK crashed here after enabling sync.
+echo "Testing startup with synchronization enabled"
+adb shell am force-stop "$PACKAGE"
+adb shell run-as "$PACKAGE" mkdir -p shared_prefs
+printf '%s\n' '<?xml version="1.0" encoding="utf-8" standalone="yes" ?>' \
+  '<map><boolean name="enabled" value="true" />' \
+  '<string name="token">synthetic_local_regression_token_12345678</string></map>' |
+  adb shell run-as "$PACKAGE" sh -c 'cat > shared_prefs/dictee-private-sync.xml'
+adb logcat -c
+adb shell am start -W -n "$PACKAGE/$ACTIVITY"
+sleep 7
+adb logcat -d -v time > android-smoke-logcat.txt
+if grep -A 45 'FATAL EXCEPTION' android-smoke-logcat.txt | grep -q 'fr.denizot.dictee'; then
+  echo "::error::Android activity crashed with synchronization enabled"
+  grep -A 45 -B 4 'FATAL EXCEPTION' android-smoke-logcat.txt | tail -100
+  exit 1
+fi
+if ! adb shell pidof "$PACKAGE" | grep -Eq '[0-9]'; then
+  echo "::error::Android activity did not survive startup after synchronization enabled"
+  exit 1
+fi
+echo "PASS: sync-enabled Android 14 startup survives the scheduler call"

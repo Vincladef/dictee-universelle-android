@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.media.MediaPlayer
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -21,11 +23,14 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
@@ -38,10 +43,23 @@ class MainActivity : Activity() {
     private lateinit var notificationModeButton: Button
     private lateinit var headsetStatus: TextView
     private lateinit var history: LinearLayout
+    private lateinit var syncEndpointField: EditText
+    private lateinit var syncTokenField: EditText
+    private lateinit var syncStatus: TextView
+    private lateinit var syncToggle: Button
     private lateinit var keyboardStatus: TextView
     private lateinit var endpointField: EditText
     private lateinit var tokenField: EditText
     private var player: MediaPlayer? = null
+    private var playingSessionId: String? = null
+    private var playingSegment = 0
+    private var playbackPaused = false
+    private var pendingExportId: String? = null
+    private val durations = mutableMapOf<String, List<Int>>()
+    private data class PlaybackUi(val button: Button, val seek: SeekBar, val time: TextView)
+    private val playbackUi = mutableMapOf<String, PlaybackUi>()
+    private val exportRequestCode = 2207
+    private val importRequestCode = 2208
     private var lastSnapshot: String = ""
     private val ink = Color.rgb(55, 49, 41)
     private val cream = Color.rgb(252, 247, 236)
@@ -59,6 +77,7 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingExportId = savedInstanceState?.getString("pendingExportId")
         window.statusBarColor = accent
         window.navigationBarColor = cream
         val scroll = ScrollView(this).apply { setBackgroundColor(cream); isFillViewport = true }
@@ -142,10 +161,73 @@ class MainActivity : Activity() {
                 toast("Paramètres enregistrés")
             }
         })
+        root.addView(text("SYNCHRONISATION VERS ORDINATEUR", 14f, true))
+        root.addView(text("Désactivée par défaut. Une fois activée, les audios sauvegardés et leurs transcriptions seront envoyés sur votre espace privé en Wi-Fi ; ils resteront disponibles sur le téléphone.", 13f))
+        syncStatus = text("Chargement des paramètres…", 13f)
+        root.addView(syncStatus)
+        root.addView(text("Adresse HTTPS de la bibliothèque (/api/library)", 13f))
+        syncEndpointField = EditText(this).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(SyncConfig.url(this@MainActivity))
+        }
+        root.addView(syncEndpointField)
+        root.addView(text("Code personnel de synchronisation (32 caractères minimum)", 13f))
+        syncTokenField = EditText(this).apply {
+            setSingleLine(true)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setText(SyncConfig.token(this@MainActivity))
+        }
+        root.addView(syncTokenField)
+        root.addView(button("Enregistrer les paramètres de synchronisation") {
+            val endpoint = syncEndpointField.text.toString().trim()
+            val code = syncTokenField.text.toString().trim()
+            if (!endpoint.startsWith("https://") || !endpoint.endsWith("/api/library") || code.length < 32)
+                toast("Adresse /api/library HTTPS et code de 32 caractères requis")
+            else {
+                SyncConfig.save(this, endpoint, code)
+                toast("Paramètres enregistrés")
+                updateSyncUi()
+            }
+        })
+        syncToggle = button("Activer la synchronisation") {
+            val enable = !SyncConfig.enabled(this)
+            if (enable && (SyncConfig.url(this).isBlank() || SyncConfig.token(this).length < 32)) {
+                toast("Enregistrez d'abord l'adresse et le code"); return@button
+            }
+            SyncConfig.enable(this, enable)
+            if (enable) { AudioSync.schedulePeriodic(this); AudioSync.scheduleOnce(this) }
+            else AudioSync.cancel(this)
+            updateSyncUi()
+        }
+        root.addView(syncToggle)
+        root.addView(button("Synchroniser maintenant") {
+            if (!SyncConfig.enabled(this)) { toast("Activez d'abord la synchronisation"); return@button }
+            syncStatus.text = "Connexion à la bibliothèque…"
+            thread(name = "dictee-manual-sync") {
+                val result = runCatching {
+                    AudioSync.sync(this) { message -> runOnUiThread { syncStatus.text = message } }
+                }
+                runOnUiThread {
+                    if (result.isFailure) syncStatus.text = "Échec : " + (result.exceptionOrNull()?.message ?: "Erreur")
+                }
+            }
+        })
+        updateSyncUi()
+        root.addView(text("IMPORTER LES ANCIENNES DICTÉES", 14f, true))
+        root.addView(text("Si votre ancienne version possédait un identifiant différent, restaurez ici sa sauvegarde ZIP. L'import n'efface ni ne remplace aucune dictée.", 13f))
+        root.addView(button("Importer une sauvegarde (.zip)") {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+            }
+            startActivityForResult(intent, importRequestCode)
+        })
         root.addView(text("MES DICTÉES", 16f, true))
         history = column(); root.addView(history)
         setContentView(scroll)
         store.recoverAbandonedSessions()
+        AudioSync.schedulePeriodic(this)
         refreshHistory()
         refreshKeyboardStatus()
         handler.post(object : Runnable {
@@ -154,9 +236,26 @@ class MainActivity : Activity() {
                 updateRemoteControlsUi()
                 val snapshot = store.all().joinToString(";") { "${it.id}:${it.state}:${it.segments.size}:${it.transcript.length}" }
                 if (snapshot != lastSnapshot) { lastSnapshot = snapshot; refreshHistory() }
+                updatePlaybackUi()
                 handler.postDelayed(this, 1300)
             }
         })
+        handler.post(object : Runnable {
+            override fun run() {
+                updatePlaybackUi()
+                handler.postDelayed(this, 300)
+            }
+        })
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pendingExportId", pendingExportId)
+        super.onSaveInstanceState(outState)
+    }
+    private fun updateSyncUi() {
+        syncToggle.text = if (SyncConfig.enabled(this)) "Désactiver la synchronisation"
+            else "Activer la synchronisation"
+        syncStatus.text = if (SyncConfig.enabled(this)) "Synchronisation activée (Wi-Fi)"
+            else "Synchronisation désactivée ; vos audios restent uniquement sur cet appareil."
     }
     private fun refreshKeyboardStatus() {
         val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
@@ -249,6 +348,7 @@ class MainActivity : Activity() {
     }
     private fun refreshHistory() {
         history.removeAllViews()
+        playbackUi.clear()
         val entries = store.all()
         if (entries.isEmpty()) { history.addView(text("Aucune dictée pour le moment.", 14f)); return }
         entries.forEach { item ->
@@ -267,7 +367,22 @@ class MainActivity : Activity() {
                 panel.addView(text(item.transcript.take(450) + (if (item.transcript.length > 450) "…" else ""), 14f))
             }
             if (item.segments.isNotEmpty() && item.state != "recording" && item.state != "paused" && item.state != "transcribing") {
-                panel.addView(button("Écouter l'audio") { playSegments(item) })
+                val button = button("▶ Écouter") { togglePlayback(item) }
+                panel.addView(button)
+                val seek = SeekBar(this).apply {
+                    max = partDurations(item).sum().coerceAtLeast(1)
+                    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) = Unit
+                        override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                        override fun onStopTrackingTouch(bar: SeekBar?) { if (bar != null) seekPlayback(item, bar.progress) }
+                    })
+                }
+                panel.addView(seek)
+                val time = text("00:00 / " + formatTime(partDurations(item).sum()), 12f)
+                panel.addView(time)
+                playbackUi[item.id] = PlaybackUi(button, seek, time)
+                panel.addView(button(if (item.segments.size == 1) "↓ Télécharger l'audio (.m4a)"
+                    else "↓ Télécharger les " + item.segments.size + " parties (.zip)") { askExport(item) })
                 if (item.state != "done") panel.addView(button("✨ Transcrire avec l'IA (à la demande)") { transcribe(item.id) })
             }
             if (item.transcript.isNotBlank()) {
@@ -284,11 +399,15 @@ class MainActivity : Activity() {
             panel.addView(button("Supprimer cette dictée") {
                 android.app.AlertDialog.Builder(this).setTitle("Supprimer l'audio et la transcription ?")
                     .setNegativeButton("Annuler", null)
-                    .setPositiveButton("Supprimer") { _, _ -> store.delete(item); refreshHistory() }
+                    .setPositiveButton("Supprimer") { _, _ ->
+                        if (playingSessionId == item.id) stopPlayback()
+                        store.delete(item); durations.remove(item.id); refreshHistory()
+                    }
                     .show()
             })
             history.addView(panel)
         }
+        updatePlaybackUi()
     }
     private fun transcribe(id: String) {
         if (DictationSettings.token(this).length < 20) { toast("Saisissez le code d'accès au serveur") ; return }
@@ -302,16 +421,177 @@ class MainActivity : Activity() {
             }
         }
     }
-    private fun playSegments(item: DictationSession, index: Int = 0) {
-        player?.release(); player = null
-        if (index >= item.segments.size) return
+    private fun partDurations(item: DictationSession): List<Int> =
+        durations.getOrPut(item.id) {
+            item.segments.indices.map { index ->
+                val file = store.segmentFile(item, index)
+                if (!file.isFile) return@map 1
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull() ?: 1)
+                        .coerceAtLeast(1)
+                } catch (_: Exception) { 1 }
+                finally { retriever.release() }
+            }
+        }
+
+    private fun formatTime(milliseconds: Int): String {
+        val seconds = milliseconds.coerceAtLeast(0) / 1000
+        return "%02d:%02d".format(Locale.FRANCE, seconds / 60, seconds % 60)
+    }
+
+    private fun togglePlayback(item: DictationSession) {
+        val existing = player
+        if (playingSessionId == item.id && existing != null) {
+            if (existing.isPlaying) {
+                existing.pause()
+                playbackPaused = true
+            } else {
+                existing.start()
+                playbackPaused = false
+            }
+            updatePlaybackUi()
+        } else playPart(item, 0)
+    }
+
+    private fun playPart(item: DictationSession, index: Int, startMs: Int = 0, autoPlay: Boolean = true) {
+        player?.release()
+        player = null
+        if (index !in item.segments.indices) { stopPlayback(); return }
         try {
             val media = MediaPlayer()
             media.setDataSource(store.segmentFile(item, index).absolutePath)
-            media.setOnCompletionListener { playSegments(item, index + 1) }
-            media.prepare(); media.start(); player = media
-        } catch (e: Exception) { toast("Lecture impossible : ${e.message}") }
+            media.prepare()
+            media.setOnCompletionListener {
+                if (playingSessionId == item.id && playingSegment == index && index + 1 < item.segments.size) {
+                    playPart(item, index + 1)
+                } else stopPlayback()
+            }
+            media.seekTo(startMs.coerceIn(0, (media.duration - 100).coerceAtLeast(0)))
+            if (autoPlay) media.start()
+            player = media
+            playingSessionId = item.id
+            playingSegment = index
+            playbackPaused = !autoPlay
+        } catch (e: Exception) {
+            stopPlayback()
+            toast("Lecture impossible : " + e.message)
+        }
+        updatePlaybackUi()
+    }
+
+    private fun seekPlayback(item: DictationSession, offset: Int) {
+        val lengths = partDurations(item)
+        var remaining = offset.coerceIn(0, lengths.sum().coerceAtLeast(1) - 1)
+        for (index in lengths.indices) {
+            if (remaining < lengths[index] || index == lengths.lastIndex) {
+                val autoPlay = playingSessionId != item.id || !playbackPaused
+                if (playingSessionId == item.id && playingSegment == index && player != null) {
+                    player?.seekTo(remaining)
+                } else playPart(item, index, remaining, autoPlay)
+                updatePlaybackUi()
+                return
+            }
+            remaining -= lengths[index]
+        }
+    }
+
+    private fun stopPlayback() {
+        player?.release()
+        player = null
+        playingSessionId = null
+        playingSegment = 0
+        playbackPaused = false
+        updatePlaybackUi()
+    }
+
+    private fun updatePlaybackUi() {
+        playbackUi.forEach { (id, controls) ->
+            val active = id == playingSessionId && player != null
+            controls.button.text = when {
+                !active -> "▶ Écouter"
+                playbackPaused -> "▶ Reprendre l'écoute"
+                else -> "⏸ Pause"
+            }
+            if (active) {
+                val lengths = durations[id].orEmpty()
+                val before = lengths.take(playingSegment).sum()
+                val position = runCatching { player?.currentPosition ?: 0 }.getOrDefault(0)
+                val elapsed = before + position
+                controls.seek.progress = elapsed.coerceIn(0, controls.seek.max)
+                controls.time.text = formatTime(elapsed) + " / " + formatTime(lengths.sum())
+            }
+        }
+    }
+
+    private fun askExport(item: DictationSession) {
+        if (item.segments.isEmpty()) return
+        val isSingle = item.segments.size == 1
+        pendingExportId = item.id
+        val name = "dictee-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ROOT).format(Date(item.createdAt)) +
+            if (isSingle) ".m4a" else ".zip"
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = if (isSingle) "audio/mp4" else "application/zip"
+            putExtra(Intent.EXTRA_TITLE, name)
+        }
+        startActivityForResult(intent, exportRequestCode)
+    }
+
+    @Deprecated("Android Activity result API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == importRequestCode) {
+            val archive = if (resultCode == RESULT_OK) data?.data else null
+            if (archive != null) {
+                toast("Import de la sauvegarde en cours…")
+                thread(name = "dictee-import") {
+                    val result = runCatching { DictationArchive(this).importFrom(archive) }
+                    runOnUiThread {
+                        if (result.isSuccess) {
+                            refreshHistory()
+                            toast("Dictées restaurées : " + result.getOrDefault(0))
+                            AudioSync.scheduleOnce(this)
+                        } else toast("Import impossible : " + (result.exceptionOrNull()?.message ?: "Erreur"))
+                    }
+                }
+            }
+            return
+        }
+        if (requestCode != exportRequestCode) return
+        val id = pendingExportId
+        pendingExportId = null
+        val uri: Uri = data?.data ?: return
+        if (resultCode != RESULT_OK || id == null) return
+        thread(name = "dictee-export") {
+            val result = runCatching {
+                val item = store.get(id) ?: error("Enregistrement introuvable")
+                require(item.segments.isNotEmpty()) { "Audio indisponible" }
+                contentResolver.openOutputStream(uri, "w")?.use { output ->
+                    if (item.segments.size == 1) {
+                        val file = store.segmentFile(item, 0)
+                        require(file.isFile) { "Fichier audio manquant" }
+                        file.inputStream().use { it.copyTo(output) }
+                    } else {
+                        ZipOutputStream(output).use { zip ->
+                            item.segments.indices.forEach { index ->
+                                val file = store.segmentFile(item, index)
+                                require(file.isFile) { "Fragment audio manquant" }
+                                zip.putNextEntry(ZipEntry("part-%03d.m4a".format(Locale.ROOT, index + 1)))
+                                file.inputStream().use { it.copyTo(zip) }
+                                zip.closeEntry()
+                            }
+                        }
+                    }
+                } ?: error("Destination inaccessible")
+            }
+            runOnUiThread {
+                toast(if (result.isSuccess) "Audio enregistré dans le dossier choisi"
+                else "Export impossible : " + (result.exceptionOrNull()?.message ?: "Erreur inconnue"))
+            }
+        }
     }
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); player?.release(); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacksAndMessages(null); player?.release(); player = null; super.onDestroy() }
 }

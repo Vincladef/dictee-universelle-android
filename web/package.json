@@ -1,0 +1,15 @@
+{
+  "name": "dictee-universelle-web",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "@vercel/blob": "^2.4.0"
+  },
+  "engines": {
+    "node": "22.x"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "@types/node": "^22.15.0"
+  }
+}

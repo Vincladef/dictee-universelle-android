@@ -12,6 +12,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name=".AudioSyncJob" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
         <service android:name=".CaptureService" android:exported="false" android:foregroundServiceType="microphone" />
         <service
             android:name=".HeadsetKeyService"

@@ -7,8 +7,8 @@ android {
         applicationId = "fr.denizot.dictee.inline"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.8.0"
+        versionCode = 10
+        versionName = "0.9.0"
     }
 
     signingConfigs {
@@ -26,7 +26,7 @@ android {
     }
     buildTypes {
         getByName("debug") {
-            applicationIdSuffix = ".testv08"
+            applicationIdSuffix = ".testv09"
             versionNameSuffix = "-test"
         }
         getByName("release") {

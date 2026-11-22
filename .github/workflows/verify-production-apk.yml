@@ -1,0 +1,66 @@
+name: Valider une APK de production signée
+# Builds the actual release application using the persistent certificate, not a debug variant.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/verify-production-apk.yml'
+      - 'android/**'
+permissions:
+  contents: read
+jobs:
+  verifier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.12.1'
+      - name: Installer Android SDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Vérifier les paramètres de signature
+        env:
+          SIGNING_B64: ${{ secrets.DICTEE_SIGNING_KEYSTORE_B64 }}
+          SIGNING_PASSWORD: ${{ secrets.DICTEE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_B64" ] || [ -z "$SIGNING_PASSWORD" ]; then
+            echo "::error::Impossible de produire une vraie mise à jour : clé et/ou mot de passe de signature de production absents."
+            exit 1
+          fi
+          printf '%s' "$SIGNING_B64" | base64 --decode > "$RUNNER_TEMP/dictee-release.p12"
+          chmod 600 "$RUNNER_TEMP/dictee-release.p12"
+          keytool -list -storetype PKCS12 -keystore "$RUNNER_TEMP/dictee-release.p12" -storepass "$SIGNING_PASSWORD" -alias dictee >/dev/null
+      - name: Compiler la véritable application Android
+        working-directory: android
+        env:
+          DICTEE_KEYSTORE_PATH: ${{ runner.temp }}/dictee-release.p12
+          DICTEE_SIGNING_PASSWORD: ${{ secrets.DICTEE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          gradle --no-daemon :app:assembleRelease :app:testDebugUnitTest
+      - name: Contrôler identifiant et certificat
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          PACKAGE="$("$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)"
+          if [ "$PACKAGE" != 'fr.denizot.dictee.inline' ]; then
+            echo "::error::Identifiant Android incompatible avec le canal de production."
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$APK"
+      - name: APK de production signée (non publiée automatiquement)
+        uses: actions/upload-artifact@v4
+        with:
+          name: dictee-universelle-production-signee
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error

@@ -76,3 +76,33 @@ Un workflow GitHub Actions est aussi fourni à la racine pour générer un APK d
 ## Respect de l'existant
 
 Aucune migration Neon, aucune modification de documents existants ni des routes de transcription Atelier BD. Seule la nouvelle route Vercel doit être ajoutée à la demande, avant que l'IA puisse fonctionner.
+
+---
+
+## Version de production 0.9.0 : clavier unique et bibliothèque audio
+
+- Dans « Mes dictées », le lecteur propose lecture, pause, reprise et navigation dans l'audio.
+- « Télécharger » ouvre le sélecteur de fichiers Android : un fragment au format M4A, plusieurs fragments au format ZIP. L'export est une **copie** et ne supprime jamais les originaux.
+- L'espace web se trouve dans le dossier `web/` du même dépôt ; son déploiement est **indépendant** de l'Atelier BD et de son API de transcription.
+- L'application Android possède un réglage distinct « Synchronisation vers ordinateur » ; il est **désactivé par défaut**. Une fois le code personnel saisi et la fonction activée, les dictées finalisées et leurs transcriptions sont envoyées sur le site privé en Wi-Fi ; aucun élément n'est effacé du téléphone.
+- Les fichiers envoyés résident dans une boutique **Vercel Blob privée**, sans liens publics. Le site utilise un code secret configuré uniquement dans les variables protégées du projet Vercel, un cookie HttpOnly sécurisé et une connexion HTTPS.
+- Les résumés sont éditables sur ordinateur. Leur génération IA est facultative ; elle réclame une variable serveur `OPENAI_API_KEY` et ne se déclenche qu'au clic.
+- Les suppressions locales ne propagent pas de suppression distante. Les modifications de résumé côté web ne sont pas encore recopiées sur le téléphone.
+- La version distribuée est signée avec le certificat de production permanent et conserve l'identifiant `fr.denizot.dictee.inline`. Les APK `.testv*` restent uniquement des outils de développement et ne sont pas destinées à être installées comme clavier principal. La compatibilité d'une mise à jour dépend de l'identifiant ET du certificat de l'application déjà présente sur le téléphone.
+- Pour éviter des frais ou des téléchargements imprévus, la synchronisation requiert une activation explicite et une connexion Wi-Fi. Elle se réessaie via JobScheduler, avec une fréquence approximative de six heures selon les contraintes Android.
+
+### Réglages du serveur web
+
+Projet Vercel : `dictee-universelle-web` ; dossier racine : `web` ; stockage privé Vercel Blob.
+La variable `DICTEE_SYNC_TOKEN` doit contenir une valeur secrète aléatoire d'au moins 32 caractères, jamais intégrée au code ni à l'APK.
+Le même code personnel est saisi dans le site et dans les réglages de synchronisation Android.
+
+### Migration avant de n'utiliser qu'un seul clavier
+
+Les anciennes APK de débogage ont des identifiants `fr.denizot.dictee.inline.testv*` ou des signatures distinctes. Android ne permet ni de les remplacer par la version signée ni de lire librement leurs fichiers privés.
+
+**Ne désinstallez aucune ancienne version avant de sauvegarder et de vérifier vos dictées.** Sur un ordinateur équipé de Python 3 et des outils ADB, branchez le téléphone avec débogage USB, puis exécutez `python tools/backup_legacy_dictations.py`. Les archives ZIP ainsi obtenues peuvent être transférées vers le téléphone, puis ouvertes dans la version de production avec « Importer une sauvegarde ». Après vérification de la restitution des enregistrements et transcriptions, l'ancienne variante peut être désinstallée ; vous ne gardez qu'un seul clavier.
+
+La procédure ADB ne peut extraire les données d'une ancienne version que si elle est débogable (`run-as` autorisé). Si elle ne l'est pas, ne la désinstallez pas : les fichiers privés seraient perdus. Consultez `docs/MIGRATION.md`.
+
+Le certificat permanent est enregistré dans les secrets GitHub Actions (keystore chiffré et mot de passe séparé), avec son empreinte publique immuable dans `android/SIGNING_CERT_SHA256.txt`. La publication officielle utilise la version signée `assembleRelease` ; elle ne doit pas utiliser les APK de test ni changer d'identifiant.

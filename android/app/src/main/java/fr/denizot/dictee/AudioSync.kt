@@ -16,7 +16,7 @@ import kotlin.concurrent.thread
 object SyncConfig {
     private const val PREF = "dictee-private-sync"
     private fun prefs(context: Context) = context.getSharedPreferences(PREF, Context.MODE_PRIVATE)
-    fun url(context: Context): String = prefs(context).getString("url", "https://dictee-universelle-web-comodenizot-9830.vercel.app/api/library") ?: ""
+    fun url(context: Context): String = prefs(context).getString("url", "https://dictee-universelle-web.vercel.app/api/library") ?: ""
     fun token(context: Context): String = prefs(context).getString("token", "") ?: ""
     fun enabled(context: Context): Boolean = prefs(context).getBoolean("enabled", false)
     fun save(context: Context, url: String, token: String) {

@@ -76,3 +76,23 @@ Un workflow GitHub Actions est aussi fourni à la racine pour générer un APK d
 ## Respect de l'existant
 
 Aucune migration Neon, aucune modification de documents existants ni des routes de transcription Atelier BD. Seule la nouvelle route Vercel doit être ajoutée à la demande, avant que l'IA puisse fonctionner.
+
+---
+
+## Version de test 0.9.0 : bibliothèque audio et ordinateur
+
+- Dans « Mes dictées », le lecteur propose lecture, pause, reprise et navigation dans l'audio.
+- « Télécharger » ouvre le sélecteur de fichiers Android : un fragment au format M4A, plusieurs fragments au format ZIP. L'export est une **copie** et ne supprime jamais les originaux.
+- L'espace web se trouve dans le dossier `web/` du même dépôt ; son déploiement est **indépendant** de l'Atelier BD et de son API de transcription.
+- L'application Android possède un réglage distinct « Synchronisation vers ordinateur » ; il est **désactivé par défaut**. Une fois le code personnel saisi et la fonction activée, les dictées finalisées et leurs transcriptions sont envoyées sur le site privé en Wi-Fi ; aucun élément n'est effacé du téléphone.
+- Les fichiers envoyés résident dans une boutique **Vercel Blob privée**, sans liens publics. Le site utilise un code secret configuré uniquement dans les variables protégées du projet Vercel, un cookie HttpOnly sécurisé et une connexion HTTPS.
+- Les résumés sont éditables sur ordinateur. Leur génération IA est facultative ; elle réclame une variable serveur `OPENAI_API_KEY` et ne se déclenche qu'au clic.
+- Les suppressions locales ne propagent pas de suppression distante. Les modifications de résumé côté web ne sont pas encore recopiées sur le téléphone.
+- Les tests de compilation Android sont automatisés dans GitHub Actions ; la version de test `.testv09` s'installe à côté de l'application existante. Le fonctionnement réel sur Motorola reste à contrôler.
+- Pour éviter des frais ou des téléchargements imprévus, la synchronisation requiert une activation explicite et une connexion Wi-Fi. Elle se réessaie via JobScheduler, avec une fréquence approximative de six heures selon les contraintes Android.
+
+### Réglages du serveur web
+
+Projet Vercel : `dictee-universelle-web` ; dossier racine : `web` ; stockage privé Vercel Blob.
+La variable `DICTEE_SYNC_TOKEN` doit contenir une valeur secrète aléatoire d'au moins 32 caractères, jamais intégrée au code ni à l'APK.
+Le même code personnel est saisi dans le site et dans les réglages de synchronisation Android.

@@ -59,6 +59,7 @@ class MainActivity : Activity() {
     private data class PlaybackUi(val button: Button, val seek: SeekBar, val time: TextView)
     private val playbackUi = mutableMapOf<String, PlaybackUi>()
     private val exportRequestCode = 2207
+    private val importRequestCode = 2208
     private var lastSnapshot: String = ""
     private val ink = Color.rgb(55, 49, 41)
     private val cream = Color.rgb(252, 247, 236)
@@ -213,6 +214,15 @@ class MainActivity : Activity() {
             }
         })
         updateSyncUi()
+        root.addView(text("IMPORTER LES ANCIENNES DICTÉES", 14f, true))
+        root.addView(text("Si votre ancienne version possédait un identifiant différent, restaurez ici sa sauvegarde ZIP. L'import n'efface ni ne remplace aucune dictée.", 13f))
+        root.addView(button("Importer une sauvegarde (.zip)") {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/zip"
+            }
+            startActivityForResult(intent, importRequestCode)
+        })
         root.addView(text("MES DICTÉES", 16f, true))
         history = column(); root.addView(history)
         setContentView(scroll)
@@ -532,6 +542,23 @@ class MainActivity : Activity() {
     @Deprecated("Android Activity result API")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == importRequestCode) {
+            val archive = if (resultCode == RESULT_OK) data?.data else null
+            if (archive != null) {
+                toast("Import de la sauvegarde en cours…")
+                thread(name = "dictee-import") {
+                    val result = runCatching { DictationArchive(this).importFrom(archive) }
+                    runOnUiThread {
+                        if (result.isSuccess) {
+                            refreshHistory()
+                            toast("Dictées restaurées : " + result.getOrDefault(0))
+                            AudioSync.scheduleOnce(this)
+                        } else toast("Import impossible : " + (result.exceptionOrNull()?.message ?: "Erreur"))
+                    }
+                }
+            }
+            return
+        }
         if (requestCode != exportRequestCode) return
         val id = pendingExportId
         pendingExportId = null

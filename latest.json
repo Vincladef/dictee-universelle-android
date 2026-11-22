@@ -1,8 +1,8 @@
 {
-  "versionCode": 11,
-  "versionName": "0.9.1",
+  "versionCode": 12,
+  "versionName": "0.9.2",
   "packageName": "fr.denizot.dictee.inline",
-  "apkUrl": "https://github.com/Vincladef/dictee-universelle-android/releases/download/v0.9.1/dictee-universelle.apk",
-  "sha256": "7969cc5206832305d67a4d498b2a425130237293da124ffa5c279c7c60c6cfa8",
+  "apkUrl": "https://github.com/Vincladef/dictee-universelle-android/releases/download/v0.9.2/dictee-universelle.apk",
+  "sha256": "73de68d55eadcb239a6de06be737609037cf726ff24c3f8ed5951b03ac25a11b",
   "signerSha256": "52606f711cb39658712daa9333d016f5138211bc971d6c57b54275f5daecc4cb"
 }

@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.media.MediaPlayer
+import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -21,11 +23,14 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 
 class MainActivity : Activity() {
@@ -42,6 +47,14 @@ class MainActivity : Activity() {
     private lateinit var endpointField: EditText
     private lateinit var tokenField: EditText
     private var player: MediaPlayer? = null
+    private var playingSessionId: String? = null
+    private var playingSegment = 0
+    private var playbackPaused = false
+    private var pendingExportId: String? = null
+    private val durations = mutableMapOf<String, List<Int>>()
+    private data class PlaybackUi(val button: Button, val seek: SeekBar, val time: TextView)
+    private val playbackUi = mutableMapOf<String, PlaybackUi>()
+    private val exportRequestCode = 2207
     private var lastSnapshot: String = ""
     private val ink = Color.rgb(55, 49, 41)
     private val cream = Color.rgb(252, 247, 236)
@@ -59,6 +72,7 @@ class MainActivity : Activity() {
     }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingExportId = savedInstanceState?.getString("pendingExportId")
         window.statusBarColor = accent
         window.navigationBarColor = cream
         val scroll = ScrollView(this).apply { setBackgroundColor(cream); isFillViewport = true }
@@ -154,9 +168,20 @@ class MainActivity : Activity() {
                 updateRemoteControlsUi()
                 val snapshot = store.all().joinToString(";") { "${it.id}:${it.state}:${it.segments.size}:${it.transcript.length}" }
                 if (snapshot != lastSnapshot) { lastSnapshot = snapshot; refreshHistory() }
+                updatePlaybackUi()
                 handler.postDelayed(this, 1300)
             }
         })
+        handler.post(object : Runnable {
+            override fun run() {
+                updatePlaybackUi()
+                handler.postDelayed(this, 300)
+            }
+        })
+    }
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pendingExportId", pendingExportId)
+        super.onSaveInstanceState(outState)
     }
     private fun refreshKeyboardStatus() {
         val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager
@@ -249,6 +274,7 @@ class MainActivity : Activity() {
     }
     private fun refreshHistory() {
         history.removeAllViews()
+        playbackUi.clear()
         val entries = store.all()
         if (entries.isEmpty()) { history.addView(text("Aucune dictée pour le moment.", 14f)); return }
         entries.forEach { item ->
@@ -267,7 +293,22 @@ class MainActivity : Activity() {
                 panel.addView(text(item.transcript.take(450) + (if (item.transcript.length > 450) "…" else ""), 14f))
             }
             if (item.segments.isNotEmpty() && item.state != "recording" && item.state != "paused" && item.state != "transcribing") {
-                panel.addView(button("Écouter l'audio") { playSegments(item) })
+                val button = button("▶ Écouter") { togglePlayback(item) }
+                panel.addView(button)
+                val seek = SeekBar(this).apply {
+                    max = partDurations(item).sum().coerceAtLeast(1)
+                    setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                        override fun onProgressChanged(bar: SeekBar?, value: Int, fromUser: Boolean) = Unit
+                        override fun onStartTrackingTouch(bar: SeekBar?) = Unit
+                        override fun onStopTrackingTouch(bar: SeekBar?) { if (bar != null) seekPlayback(item, bar.progress) }
+                    })
+                }
+                panel.addView(seek)
+                val time = text("00:00 / " + formatTime(partDurations(item).sum()), 12f)
+                panel.addView(time)
+                playbackUi[item.id] = PlaybackUi(button, seek, time)
+                panel.addView(button(if (item.segments.size == 1) "↓ Télécharger l'audio (.m4a)"
+                    else "↓ Télécharger les " + item.segments.size + " parties (.zip)") { askExport(item) })
                 if (item.state != "done") panel.addView(button("✨ Transcrire avec l'IA (à la demande)") { transcribe(item.id) })
             }
             if (item.transcript.isNotBlank()) {
@@ -284,11 +325,15 @@ class MainActivity : Activity() {
             panel.addView(button("Supprimer cette dictée") {
                 android.app.AlertDialog.Builder(this).setTitle("Supprimer l'audio et la transcription ?")
                     .setNegativeButton("Annuler", null)
-                    .setPositiveButton("Supprimer") { _, _ -> store.delete(item); refreshHistory() }
+                    .setPositiveButton("Supprimer") { _, _ ->
+                        if (playingSessionId == item.id) stopPlayback()
+                        store.delete(item); durations.remove(item.id); refreshHistory()
+                    }
                     .show()
             })
             history.addView(panel)
         }
+        updatePlaybackUi()
     }
     private fun transcribe(id: String) {
         if (DictationSettings.token(this).length < 20) { toast("Saisissez le code d'accès au serveur") ; return }
@@ -302,16 +347,160 @@ class MainActivity : Activity() {
             }
         }
     }
-    private fun playSegments(item: DictationSession, index: Int = 0) {
-        player?.release(); player = null
-        if (index >= item.segments.size) return
+    private fun partDurations(item: DictationSession): List<Int> =
+        durations.getOrPut(item.id) {
+            item.segments.indices.map { index ->
+                val file = store.segmentFile(item, index)
+                if (!file.isFile) return@map 1
+                val retriever = MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    (retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toIntOrNull() ?: 1)
+                        .coerceAtLeast(1)
+                } catch (_: Exception) { 1 }
+                finally { retriever.release() }
+            }
+        }
+
+    private fun formatTime(milliseconds: Int): String {
+        val seconds = milliseconds.coerceAtLeast(0) / 1000
+        return "%02d:%02d".format(Locale.FRANCE, seconds / 60, seconds % 60)
+    }
+
+    private fun togglePlayback(item: DictationSession) {
+        val existing = player
+        if (playingSessionId == item.id && existing != null) {
+            if (existing.isPlaying) {
+                existing.pause()
+                playbackPaused = true
+            } else {
+                existing.start()
+                playbackPaused = false
+            }
+            updatePlaybackUi()
+        } else playPart(item, 0)
+    }
+
+    private fun playPart(item: DictationSession, index: Int, startMs: Int = 0, autoPlay: Boolean = true) {
+        player?.release()
+        player = null
+        if (index !in item.segments.indices) { stopPlayback(); return }
         try {
             val media = MediaPlayer()
             media.setDataSource(store.segmentFile(item, index).absolutePath)
-            media.setOnCompletionListener { playSegments(item, index + 1) }
-            media.prepare(); media.start(); player = media
-        } catch (e: Exception) { toast("Lecture impossible : ${e.message}") }
+            media.prepare()
+            media.setOnCompletionListener {
+                if (playingSessionId == item.id && playingSegment == index && index + 1 < item.segments.size) {
+                    playPart(item, index + 1)
+                } else stopPlayback()
+            }
+            media.seekTo(startMs.coerceIn(0, (media.duration - 100).coerceAtLeast(0)))
+            if (autoPlay) media.start()
+            player = media
+            playingSessionId = item.id
+            playingSegment = index
+            playbackPaused = !autoPlay
+        } catch (e: Exception) {
+            stopPlayback()
+            toast("Lecture impossible : " + e.message)
+        }
+        updatePlaybackUi()
+    }
+
+    private fun seekPlayback(item: DictationSession, offset: Int) {
+        val lengths = partDurations(item)
+        var remaining = offset.coerceIn(0, lengths.sum().coerceAtLeast(1) - 1)
+        for (index in lengths.indices) {
+            if (remaining < lengths[index] || index == lengths.lastIndex) {
+                val autoPlay = playingSessionId != item.id || !playbackPaused
+                if (playingSessionId == item.id && playingSegment == index && player != null) {
+                    player?.seekTo(remaining)
+                } else playPart(item, index, remaining, autoPlay)
+                updatePlaybackUi()
+                return
+            }
+            remaining -= lengths[index]
+        }
+    }
+
+    private fun stopPlayback() {
+        player?.release()
+        player = null
+        playingSessionId = null
+        playingSegment = 0
+        playbackPaused = false
+        updatePlaybackUi()
+    }
+
+    private fun updatePlaybackUi() {
+        playbackUi.forEach { (id, controls) ->
+            val active = id == playingSessionId && player != null
+            controls.button.text = when {
+                !active -> "▶ Écouter"
+                playbackPaused -> "▶ Reprendre l'écoute"
+                else -> "⏸ Pause"
+            }
+            if (active) {
+                val lengths = durations[id].orEmpty()
+                val before = lengths.take(playingSegment).sum()
+                val position = runCatching { player?.currentPosition ?: 0 }.getOrDefault(0)
+                val elapsed = before + position
+                controls.seek.progress = elapsed.coerceIn(0, controls.seek.max)
+                controls.time.text = formatTime(elapsed) + " / " + formatTime(lengths.sum())
+            }
+        }
+    }
+
+    private fun askExport(item: DictationSession) {
+        if (item.segments.isEmpty()) return
+        val isSingle = item.segments.size == 1
+        pendingExportId = item.id
+        val name = "dictee-" + SimpleDateFormat("yyyyMMdd-HHmm", Locale.ROOT).format(Date(item.createdAt)) +
+            if (isSingle) ".m4a" else ".zip"
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = if (isSingle) "audio/mp4" else "application/zip"
+            putExtra(Intent.EXTRA_TITLE, name)
+        }
+        startActivityForResult(intent, exportRequestCode)
+    }
+
+    @Deprecated("Android Activity result API")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != exportRequestCode) return
+        val id = pendingExportId
+        pendingExportId = null
+        val uri: Uri = data?.data ?: return
+        if (resultCode != RESULT_OK || id == null) return
+        thread(name = "dictee-export") {
+            val result = runCatching {
+                val item = store.get(id) ?: error("Enregistrement introuvable")
+                require(item.segments.isNotEmpty()) { "Audio indisponible" }
+                contentResolver.openOutputStream(uri, "w")?.use { output ->
+                    if (item.segments.size == 1) {
+                        val file = store.segmentFile(item, 0)
+                        require(file.isFile) { "Fichier audio manquant" }
+                        file.inputStream().use { it.copyTo(output) }
+                    } else {
+                        ZipOutputStream(output).use { zip ->
+                            item.segments.indices.forEach { index ->
+                                val file = store.segmentFile(item, index)
+                                require(file.isFile) { "Fragment audio manquant" }
+                                zip.putNextEntry(ZipEntry("part-%03d.m4a".format(Locale.ROOT, index + 1)))
+                                file.inputStream().use { it.copyTo(zip) }
+                                zip.closeEntry()
+                            }
+                        }
+                    }
+                } ?: error("Destination inaccessible")
+            }
+            runOnUiThread {
+                toast(if (result.isSuccess) "Audio enregistré dans le dossier choisi"
+                else "Export impossible : " + (result.exceptionOrNull()?.message ?: "Erreur inconnue"))
+            }
+        }
     }
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
-    override fun onDestroy() { handler.removeCallbacksAndMessages(null); player?.release(); super.onDestroy() }
+    override fun onDestroy() { handler.removeCallbacksAndMessages(null); player?.release(); player = null; super.onDestroy() }
 }

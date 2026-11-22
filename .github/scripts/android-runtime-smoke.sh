@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PACKAGE="fr.denizot.dictee.inline.test"
-ACTIVITY="fr.denizot.dictee.MainActivity"
+# Read the real package identifier from the APK, never assume a test suffix.
 APK="android/app/build/outputs/apk/debug/app-debug.apk"
+PACKAGE="$("${ANDROID_HOME}/build-tools/35.0.0/aapt" dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)"
+test -n "$PACKAGE" || { echo "::error::Cannot determine APK package"; exit 1; }
+ACTIVITY="fr.denizot.dictee.MainActivity"
 
 cleanup() {
   adb logcat -d -v time > android-smoke-logcat.txt || true
   adb shell dumpsys activity activities > android-smoke-activity.txt || true
-  adb shell screencap -p /sdcard/dictee-launch.png || true
-  adb pull /sdcard/dictee-launch.png android-smoke-screenshot.png || true
+  adb shell screencap -p /sdcard/Download/dictee-launch.png || true
+  adb pull /sdcard/Download/dictee-launch.png android-smoke-screenshot.png || true
 }
 trap cleanup EXIT
 

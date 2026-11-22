@@ -136,54 +136,69 @@ class MainActivity : Activity() {
         root.addView(button("Choisir le clavier actif") {
             (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker()
         })
-        root.addView(text("PARAMÈTRES DE TRANSCRIPTION", 14f, true))
-        root.addView(text("Adresse HTTPS du serveur (Atelier BD)", 13f))
+        val transcriptionSettings = column()
+        root.addView(button("Réglages avancés de transcription") {
+            transcriptionSettings.visibility =
+                if (transcriptionSettings.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        })
+        root.addView(transcriptionSettings)
+        transcriptionSettings.visibility = if (DictationSettings.token(this).isBlank()) View.VISIBLE else View.GONE
+        transcriptionSettings.addView(text("Adresse HTTPS du serveur (Atelier BD)", 13f))
         endpointField = EditText(this).apply {
             setSingleLine(true); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(DictationSettings.endpoint(this@MainActivity))
         }
-        root.addView(endpointField)
-        root.addView(text("Code d'accès personnel (ne saisissez pas votre clé OpenAI)", 13f))
+        transcriptionSettings.addView(endpointField)
+        transcriptionSettings.addView(text("Code de transcription (configuration initiale uniquement)", 13f))
         tokenField = EditText(this).apply {
             setSingleLine(true); inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setText(DictationSettings.token(this@MainActivity))
         }
-        root.addView(tokenField)
-        root.addView(button("Enregistrer les paramètres") {
+        transcriptionSettings.addView(tokenField)
+        transcriptionSettings.addView(button("Enregistrer la connexion de transcription") {
             val endpoint = endpointField.text.toString().trim()
             if (!endpoint.startsWith("https://")) {
                 toast("Une adresse HTTPS est nécessaire")
             } else {
                 DictationSettings.save(this, endpoint, tokenField.text.toString())
-                toast("Paramètres enregistrés")
+                transcriptionSettings.visibility = View.GONE
+                toast("Connexion de transcription enregistrée")
             }
         })
         root.addView(text("SYNCHRONISATION VERS ORDINATEUR", 14f, true))
         root.addView(text("Désactivée par défaut. Une fois activée, les audios sauvegardés et leurs transcriptions seront envoyés sur votre espace privé en Wi-Fi ; ils resteront disponibles sur le téléphone.", 13f))
         syncStatus = text("Chargement des paramètres…", 13f)
         root.addView(syncStatus)
-        root.addView(text("Adresse HTTPS de la bibliothèque (/api/library)", 13f))
+        val syncSettings = column()
+        root.addView(button("Configurer ou modifier la connexion à l'ordinateur") {
+            syncSettings.visibility =
+                if (syncSettings.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        })
+        root.addView(syncSettings)
+        syncSettings.visibility = if (SyncConfig.token(this).isBlank()) View.VISIBLE else View.GONE
+        syncSettings.addView(text("Adresse technique de la bibliothèque", 13f))
         syncEndpointField = EditText(this).apply {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(SyncConfig.url(this@MainActivity))
         }
-        root.addView(syncEndpointField)
-        root.addView(text("Code personnel de synchronisation (32 caractères minimum)", 13f))
+        syncSettings.addView(syncEndpointField)
+        syncSettings.addView(text("Code de connexion (configuration initiale uniquement)", 13f))
         syncTokenField = EditText(this).apply {
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             setText(SyncConfig.token(this@MainActivity))
         }
-        root.addView(syncTokenField)
-        root.addView(button("Enregistrer les paramètres de synchronisation") {
+        syncSettings.addView(syncTokenField)
+        syncSettings.addView(button("Enregistrer la connexion à l'ordinateur") {
             val endpoint = syncEndpointField.text.toString().trim()
             val code = syncTokenField.text.toString().trim()
             if (!endpoint.startsWith("https://") || !endpoint.endsWith("/api/library") || code.length < 32)
                 toast("Adresse /api/library HTTPS et code de 32 caractères requis")
             else {
                 SyncConfig.save(this, endpoint, code)
-                toast("Paramètres enregistrés")
+                syncSettings.visibility = View.GONE
+                toast("Connexion enregistrée")
                 updateSyncUi()
             }
         })
@@ -193,8 +208,11 @@ class MainActivity : Activity() {
                 toast("Enregistrez d'abord l'adresse et le code"); return@button
             }
             SyncConfig.enable(this, enable)
-            if (enable) { AudioSync.schedulePeriodic(this); AudioSync.scheduleOnce(this) }
-            else AudioSync.cancel(this)
+            if (enable) {
+                if (AudioSync.schedulePeriodic(this)) AudioSync.scheduleOnce(this)
+                if (!SyncConfig.enabled(this))
+                    toast("Synchronisation suspendue : vérifiez la connexion. Les dictées restent enregistrées.")
+            } else AudioSync.cancel(this)
             updateSyncUi()
         }
         root.addView(syncToggle)
@@ -225,6 +243,7 @@ class MainActivity : Activity() {
         setContentView(scroll)
         store.recoverAbandonedSessions()
         AudioSync.schedulePeriodic(this)
+        updateSyncUi()
         refreshHistory()
         refreshKeyboardStatus()
         handler.post(object : Runnable {
@@ -251,8 +270,12 @@ class MainActivity : Activity() {
     private fun updateSyncUi() {
         syncToggle.text = if (SyncConfig.enabled(this)) "Désactiver la synchronisation"
             else "Activer la synchronisation"
-        syncStatus.text = if (SyncConfig.enabled(this)) "Synchronisation activée (Wi-Fi)"
-            else "Synchronisation désactivée ; vos audios restent uniquement sur cet appareil."
+        val failure = SyncConfig.schedulingError(this)
+        syncStatus.text = when {
+            failure.isNotBlank() -> failure + " Vos enregistrements locaux sont conservés."
+            SyncConfig.enabled(this) -> "Sauvegarde vers ordinateur activée (Wi-Fi)."
+            else -> "Sauvegarde vers ordinateur désactivée. Les dictées restent sur le téléphone."
+        }
     }
     private fun refreshKeyboardStatus() {
         val manager = getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager

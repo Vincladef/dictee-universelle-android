@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - '.github/workflows/verify-production-apk.yml'
+      - 'android/**'
 permissions:
   contents: read
 jobs:

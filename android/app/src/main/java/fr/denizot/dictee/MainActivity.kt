@@ -125,13 +125,10 @@ class MainActivity : Activity() {
             }
         }
         root.addView(notificationModeButton)
-        root.addView(text("ÉCOUTEURS : COMMANDE RENFORCÉE (FACULTATIVE)", 14f, true))
-        root.addView(text("Android donne parfois les boutons Play/Pause au dernier lecteur audio. Ce mode utilise une autorisation d'accessibilité pour intercepter la touche pendant la dictée. Il n'analyse ni le texte ni le contenu des écrans ; l'autorisation reste toutefois étendue et doit être activée par vous.", 13f))
-        headsetStatus = text("Vérification de la commande…", 13f)
+        root.addView(text("ÉCOUTEURS : COMMANDES ANDROID", 14f, true))
+        root.addView(text("Pendant l'enregistrement, les touches Play/Pause des écouteurs utilisent la session multimédia Android, sans accès spécial au téléphone. Si un lecteur de musique garde la priorité, utilisez les commandes de notification.", 13f))
+        headsetStatus = text("Commandes des écouteurs disponibles pendant la dictée.", 13f)
         root.addView(headsetStatus)
-        root.addView(button("Configurer la commande des écouteurs") {
-            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-        })
         root.addView(text("CLAVIER DE DICTÉE", 14f, true))
         keyboardStatus = text("Vérification du clavier actif…", 13f)
         root.addView(keyboardStatus)
@@ -309,10 +306,10 @@ class MainActivity : Activity() {
                 "Présentation : notification classique (toucher pour essayer le panneau)"
             }
         }
-        headsetStatus.text = if (HeadsetKeyService.connected) {
-            "Commande renforcée active. Dernière touche : " + HeadsetKeyService.lastKeyDescription
+        headsetStatus.text = if (CaptureService.active) {
+            "Dictée en cours : les touches multimédias peuvent mettre en pause ou reprendre selon la priorité Android."
         } else {
-            "Commande renforcée inactive. Pour l'activer : Paramètres > Accessibilité > Dictée : boutons des écouteurs."
+            "Les commandes des écouteurs utilisent MediaSession pendant l'enregistrement, sans service d'accessibilité."
         }
     }
 
